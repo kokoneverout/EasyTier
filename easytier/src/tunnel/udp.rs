@@ -912,7 +912,7 @@ impl super::TunnelConnector for UdpTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
-        if self.bind_addrs.is_empty() || addr.is_ipv6() {
+        if self.bind_addrs.is_empty() {
             self.connect_with_default_bind(addr).await
         } else {
             self.connect_with_custom_bind(addr).await
@@ -954,6 +954,16 @@ mod tests {
             },
         },
     };
+
+    #[tokio::test]
+    async fn ipv6_udp_rejects_failed_explicit_source_bind() {
+        let mut listener = UdpTunnelListener::new("udp://[::1]:0".parse().unwrap());
+        listener.listen().await.unwrap();
+        let mut connector = UdpTunnelConnector::new(listener.local_url());
+        connector.set_bind_addrs(vec!["[2001:db8:ffff::1234]:0".parse().unwrap()]);
+        // The former IPv6 special case ignored this binding and connected.
+        assert!(connector.connect().await.is_err());
+    }
 
     #[tokio::test]
     async fn udp_pingpong() {

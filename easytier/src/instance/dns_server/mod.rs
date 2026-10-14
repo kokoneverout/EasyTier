@@ -10,7 +10,7 @@ pub mod client_instance;
 pub mod runner;
 #[cfg(feature = "magic-dns")]
 pub mod server_instance;
-#[cfg(feature = "magic-dns")]
+#[cfg(any(feature = "magic-dns", windows))]
 pub mod system_config;
 
 #[cfg(all(test, feature = "tun", feature = "magic-dns"))]

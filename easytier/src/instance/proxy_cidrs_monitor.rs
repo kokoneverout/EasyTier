@@ -57,10 +57,34 @@ impl ProxyCidrsMonitor {
         (proxy_cidrs, added, removed)
     }
 
+    /// Collects desired IPv6 routes from manual routes_v6 config.
+    /// Unlike IPv4, peers do not advertise IPv6 proxy cidrs, so manual routes
+    /// are the only source; absent config means no IPv6 routes are managed.
+    pub async fn diff_routes_v6(
+        global_ctx: &ArcGlobalCtx,
+        cur_routes: &BTreeSet<cidr::Ipv6Cidr>,
+    ) -> (BTreeSet<cidr::Ipv6Cidr>, Vec<cidr::Ipv6Cidr>, Vec<cidr::Ipv6Cidr>) {
+        let routes_v6 = global_ctx
+            .config
+            .get_routes_v6()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        if cur_routes == &routes_v6 {
+            return (routes_v6, Vec::new(), Vec::new());
+        }
+        let added = routes_v6.difference(cur_routes).cloned().collect();
+        let removed = cur_routes.difference(&routes_v6).cloned().collect();
+
+        (routes_v6, added, removed)
+    }
+
     /// Starts monitoring proxy_cidrs changes and emits events with diffs
     pub fn start(self) -> AbortOnDropHandle<()> {
         AbortOnDropHandle::new(tokio::spawn(async move {
             let mut cur_proxy_cidrs = BTreeSet::new();
+            let mut cur_routes_v6 = BTreeSet::new();
             let mut last_update = None::<Instant>;
 
             loop {
@@ -84,11 +108,20 @@ impl ProxyCidrsMonitor {
 
                 cur_proxy_cidrs = new_proxy_cidrs;
 
-                if added.is_empty() && removed.is_empty() {
-                    continue;
+                if !added.is_empty() || !removed.is_empty() {
+                    self.global_ctx
+                        .issue_event(GlobalCtxEvent::ProxyCidrsUpdated(added, removed));
                 }
-                self.global_ctx
-                    .issue_event(GlobalCtxEvent::ProxyCidrsUpdated(added, removed));
+
+                let (new_routes_v6, added_v6, removed_v6) =
+                    Self::diff_routes_v6(&self.global_ctx, &cur_routes_v6).await;
+
+                cur_routes_v6 = new_routes_v6;
+
+                if !added_v6.is_empty() || !removed_v6.is_empty() {
+                    self.global_ctx
+                        .issue_event(GlobalCtxEvent::RoutesV6Updated(added_v6, removed_v6));
+                }
             }
         }))
     }

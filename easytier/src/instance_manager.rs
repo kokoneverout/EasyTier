@@ -244,10 +244,52 @@ impl NetworkInstanceManager {
             .ok_or_else(|| anyhow::anyhow!("tun fd sender not found"))?;
 
         sender
-            .try_send(Some(fd))
+            .try_send(crate::launcher::MobileTunFdRequest {
+                fd: Some(fd),
+                completion: None,
+            })
             .map_err(|e| anyhow::anyhow!("failed to send tun fd: {}", e))?;
 
         Ok(())
+    }
+
+    /// Like [Self::set_tun_fd], but waits for the mobile routine to finish
+    /// `setup_nic_ctx_for_mobile` and returns its real result instead of
+    /// reporting that the request was queued.
+    pub async fn set_tun_fd_and_wait(
+        &self,
+        instance_id: &uuid::Uuid,
+        fd: i32,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let sender = self
+            .instance_map
+            .get(instance_id)
+            .ok_or_else(|| "instance not found".to_string())?
+            .get_tun_fd_sender()
+            .ok_or_else(|| "tun fd sender not found".to_string())?;
+
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        // Bound both queue insertion and setup, including a full queue.
+        let wait = async {
+            sender
+                .send(crate::launcher::MobileTunFdRequest {
+                    fd: Some(fd),
+                    completion: Some(completion_tx),
+                })
+                .await
+                .map_err(|e| format!("failed to send tun fd: {e}"))?;
+            completion_rx
+                .await
+                .map_err(|_| "tun fd setup result channel closed".to_string())?
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "tun fd setup did not complete within {} seconds",
+                timeout.as_secs_f32()
+            )),
+        }
     }
 
     pub fn get_config_dir(&self) -> Option<&PathBuf> {
@@ -470,6 +512,16 @@ fn handle_event(
                             ?added,
                             ?removed,
                             "[{}] proxy CIDRs updated",
+                            instance_id
+                        );
+                    }
+
+                    GlobalCtxEvent::RoutesV6Updated(added, removed) => {
+                        event!(
+                            info,
+                            ?added,
+                            ?removed,
+                            "[{}] ipv6 routes updated",
                             instance_id
                         );
                     }

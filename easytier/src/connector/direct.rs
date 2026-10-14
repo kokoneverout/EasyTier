@@ -13,7 +13,7 @@ use std::{
 
 use crate::{
     common::{
-        PeerId, dns::socket_addrs, error::Error, global_ctx::ArcGlobalCtx,
+        PeerId, dns::peer_socket_addrs, error::Error, global_ctx::ArcGlobalCtx,
         stun::StunInfoCollectorTrait,
     },
     connector::udp_hole_punch::handle_rpc_result,
@@ -43,7 +43,7 @@ use crate::tunnel::{FromUrl, IpScheme, TunnelScheme, matches_scheme};
 use anyhow::Context;
 use rand::Rng;
 use socket2::Protocol;
-use tokio::{net::UdpSocket, task::JoinSet, time::timeout};
+use tokio::{task::JoinSet, time::timeout};
 use url::Host;
 
 pub const DIRECT_CONNECTOR_SERVICE_ID: u32 = 1;
@@ -60,8 +60,11 @@ fn mapped_listener_port(url: &url::Url) -> Option<u16> {
     })
 }
 
-async fn resolve_mapped_listener_addrs(listener: &url::Url) -> Result<Vec<SocketAddr>, Error> {
-    socket_addrs(listener, || mapped_listener_port(listener)).await
+async fn resolve_mapped_listener_addrs(
+    listener: &url::Url,
+    global_ctx: &ArcGlobalCtx,
+) -> Result<Vec<SocketAddr>, Error> {
+    peer_socket_addrs(listener, || mapped_listener_port(listener), global_ctx).await
 }
 
 fn is_usable_public_ipv6_candidate(ip: &Ipv6Addr, global_ctx: &ArcGlobalCtx) -> bool {
@@ -202,8 +205,9 @@ impl DirectConnectorManagerData {
         dst_peer_id: PeerId,
         remote_url: &url::Url,
     ) -> Result<(PeerId, PeerConnId), Error> {
+        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
         let local_socket = Arc::new(
-            UdpSocket::bind("[::]:0")
+            crate::common::underlay::bind_udp(&self.global_ctx, remote_addr)
                 .await
                 .with_context(|| format!("failed to bind local socket for {}", remote_url))?,
         );
@@ -232,7 +236,6 @@ impl DirectConnectorManagerData {
         }
 
         let udp_connector = UdpTunnelConnector::new(remote_url.clone());
-        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V6).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
             .await?;
@@ -248,14 +251,12 @@ impl DirectConnectorManagerData {
         dst_peer_id: PeerId,
         remote_url: &url::Url,
     ) -> Result<(PeerId, PeerConnId), Error> {
-        let local_socket = {
-            let _g = self.global_ctx.net_ns.guard();
-            Arc::new(
-                UdpSocket::bind("0.0.0.0:0")
-                    .await
-                    .with_context(|| format!("failed to bind local socket for {}", remote_url))?,
-            )
-        };
+        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4).await?;
+        let local_socket = Arc::new(
+            crate::common::underlay::bind_udp(&self.global_ctx, remote_addr)
+                .await
+                .with_context(|| format!("failed to bind local socket for {}", remote_url))?,
+        );
         let connector_addr = self
             .peer_manager
             .get_global_ctx()
@@ -269,7 +270,6 @@ impl DirectConnectorManagerData {
             .await;
 
         let udp_connector = UdpTunnelConnector::new(remote_url.clone());
-        let remote_addr = SocketAddr::from_url(remote_url.clone(), IpVersion::V4).await?;
         let ret = udp_connector
             .try_connect_with_socket(local_socket, remote_addr)
             .await?;
@@ -407,7 +407,7 @@ impl DirectConnectorManagerData {
         listener: &url::Url,
         tasks: &mut JoinSet<Result<(), Error>>,
     ) {
-        let Ok(mut addrs) = resolve_mapped_listener_addrs(listener).await else {
+        let Ok(mut addrs) = resolve_mapped_listener_addrs(listener, &self.global_ctx).await else {
             tracing::error!(?listener, "failed to parse socket address from listener");
             return;
         };
@@ -870,7 +870,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_mapped_listener_addrs_uses_default_ports() {
-        let wss_addrs = resolve_mapped_listener_addrs(&"wss://127.0.0.1".parse().unwrap())
+        let ctx = crate::common::global_ctx::tests::get_mock_global_ctx();
+        let wss_addrs = resolve_mapped_listener_addrs(&"wss://127.0.0.1".parse().unwrap(), &ctx)
             .await
             .unwrap();
         assert_eq!(
@@ -878,7 +879,7 @@ mod tests {
             vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443)]
         );
 
-        let tcp_addrs = resolve_mapped_listener_addrs(&"tcp://127.0.0.1".parse().unwrap())
+        let tcp_addrs = resolve_mapped_listener_addrs(&"tcp://127.0.0.1".parse().unwrap(), &ctx)
             .await
             .unwrap();
         assert_eq!(

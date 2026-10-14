@@ -71,8 +71,8 @@ export async function setLoggingLevel(level: string) {
   return await invoke('set_logging_level', { level })
 }
 
-export async function setTunFd(fd: number) {
-  return await invoke('set_tun_fd', { fd })
+export async function setTunFd(fd: number, instanceId?: string) {
+  return await invoke('set_tun_fd', { fd, instanceId })
 }
 
 export async function getEasytierVersion() {

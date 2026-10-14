@@ -202,6 +202,7 @@ pub(crate) struct UdpSocketArray {
     sockets: Arc<DashMap<SocketAddr, Arc<UdpSocket>>>,
     max_socket_count: usize,
     net_ns: NetNS,
+    ctx: std::sync::Weak<crate::common::global_ctx::GlobalCtx>,
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
 
     intreast_tids: Arc<DashSet<u32>>,
@@ -217,11 +218,18 @@ impl UdpSocketArray {
             sockets: Arc::new(DashMap::new()),
             max_socket_count,
             net_ns,
+            ctx: std::sync::Weak::new(),
             tasks,
 
             intreast_tids: Arc::new(DashSet::new()),
             tid_to_socket: Arc::new(DashMap::new()),
         }
+    }
+
+    pub fn new_with_ctx(max_socket_count: usize, ctx: &ArcGlobalCtx) -> Self {
+        let mut array = Self::new(max_socket_count, ctx.net_ns.clone());
+        array.ctx = Arc::downgrade(ctx);
+        array
     }
 
     pub fn started(&self) -> bool {
@@ -288,7 +296,12 @@ impl UdpSocketArray {
         tracing::info!("starting udp socket array");
 
         while self.sockets.len() < self.max_socket_count {
-            let socket = {
+            let socket = if let Some(ctx) = self.ctx.upgrade() {
+                Arc::new(
+                    crate::common::underlay::bind_udp(&ctx, "8.8.8.8:3478".parse().unwrap())
+                        .await?,
+                )
+            } else {
                 let _g = self.net_ns.guard();
                 Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
             };
@@ -373,10 +386,14 @@ impl UdpHolePunchListener {
         with_mapped_addr: bool,
         port: Option<u16>,
     ) -> Result<Self, Error> {
-        let socket = {
-            let _g = peer_mgr.get_global_ctx().net_ns.guard();
-            Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port.unwrap_or(0))).await?)
-        };
+        let socket = Arc::new(
+            crate::common::underlay::bind_udp_from_port(
+                &peer_mgr.get_global_ctx(),
+                "8.8.8.8:3478".parse().unwrap(),
+                port.unwrap_or(0),
+            )
+            .await?,
+        );
         let local_port = socket.local_addr()?.port();
         let listen_url: url::Url = format!("udp://0.0.0.0:{local_port}").parse().unwrap();
 

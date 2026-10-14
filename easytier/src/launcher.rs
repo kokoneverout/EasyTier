@@ -32,7 +32,16 @@ use tokio::{
 pub type MyNodeInfo = crate::proto::api::manage::MyNodeInfo;
 
 type ArcMutApiService = Arc<RwLock<Option<Arc<dyn InstanceRpcService>>>>;
-type TunFd = Option<i32>;
+
+/// A mobile TUN fd injection request. `fd: None` asks the routine to exit;
+/// `fd: Some(-1)` detaches and clears the NIC without tearing the routine down.
+/// `completion` receives the real result of the NIC setup, not just the fact
+/// that the request was queued.
+#[derive(Debug)]
+pub struct MobileTunFdRequest {
+    pub fd: Option<i32>,
+    pub completion: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+}
 
 #[derive(serde::Serialize, Clone)]
 pub struct Event {
@@ -42,7 +51,10 @@ pub struct Event {
 
 struct EasyTierData {
     events: RwLock<VecDeque<Event>>,
-    tun_fd: (mpsc::Sender<TunFd>, Mutex<Option<mpsc::Receiver<TunFd>>>),
+    tun_fd: (
+        mpsc::Sender<MobileTunFdRequest>,
+        Mutex<Option<mpsc::Receiver<MobileTunFdRequest>>>,
+    ),
     event_subscriber: RwLock<broadcast::Sender<GlobalCtxEvent>>,
     instance_stop_notifier: Arc<tokio::sync::Notify>,
 }
@@ -56,6 +68,32 @@ impl Default for EasyTierData {
             events: RwLock::new(VecDeque::new()),
             tun_fd: (sender, Mutex::new(Some(receiver))),
             instance_stop_notifier: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+/// Consumes mobile TUN fd requests. Each request's `completion` (when present)
+/// is answered only after `setup` finishes, so senders can distinguish
+/// "queued" from "the core actually took over the interface". A request with
+/// `fd: None` terminates the loop.
+pub(crate) async fn mobile_tun_fd_request_loop(
+    mut receiver: mpsc::Receiver<MobileTunFdRequest>,
+    mut setup: impl FnMut(i32) -> futures::future::BoxFuture<'static, Result<(), anyhow::Error>>,
+) {
+    while let Some(request) = receiver.recv().await {
+        let Some(fd) = request.fd else {
+            return;
+        };
+        // A timed-out queued attach must not install an FD that Android may
+        // already have closed/reused. The GUI sends a separate detach request.
+        if request.completion.as_ref().is_some_and(|reply| reply.is_closed()) {
+            continue;
+        }
+        let result = setup(fd).await;
+        if let Some(completion) = request.completion {
+            let _ = completion.send(result.map_err(|e| e.to_string()));
+        } else if let Err(error) = result {
+            tracing::error!(?error, fd, "mobile TUN setup failed");
         }
     }
 }
@@ -106,22 +144,21 @@ impl EasyTierLauncher {
         let peer_mgr = instance.get_peer_manager();
         let nic_ctx = instance.get_nic_ctx();
         let peer_packet_receiver = instance.get_peer_packet_receiver();
-        let mut tun_fd_receiver = data.tun_fd.1.lock().unwrap().take().unwrap();
+        let tun_fd_receiver = data.tun_fd.1.lock().unwrap().take().unwrap();
 
         tasks.spawn(async move {
-            loop {
-                let Some(tun_fd) = tun_fd_receiver.recv().await.flatten() else {
-                    return;
-                };
-                let res = Instance::setup_nic_ctx_for_mobile(
+            use futures::FutureExt;
+            mobile_tun_fd_request_loop(tun_fd_receiver, move |fd| {
+                Instance::setup_nic_ctx_for_mobile(
                     nic_ctx.clone(),
                     global_ctx.clone(),
                     peer_mgr.clone(),
                     peer_packet_receiver.clone(),
-                    tun_fd,
+                    fd,
                 )
-                .await;
-            }
+                .boxed()
+            })
+            .await;
         });
     }
 
@@ -158,7 +195,23 @@ impl EasyTierLauncher {
         #[cfg(mobile)]
         Self::run_routine_for_mobile(&instance, &data, &mut tasks).await;
 
-        instance.run().await?;
+        let start_result = tokio::select! {
+            result = instance.run() => Some(result),
+            _ = stop_signal.notified() => None,
+        };
+        match start_result {
+            Some(Ok(())) => {}
+            result => {
+                // Startup may already have installed TUN routes and exit DNS.
+                // Finish their cleanup before the launcher's runtime exits.
+                tasks.abort_all();
+                instance.clear_resources().await;
+                return match result {
+                    Some(Err(error)) => Err(error.into()),
+                    _ => Ok(()),
+                };
+            }
+        }
 
         api_service
             .write()
@@ -398,7 +451,7 @@ impl NetworkInstance {
         self.config.get_network_identity().network_name
     }
 
-    pub fn get_tun_fd_sender(&self) -> Option<mpsc::Sender<TunFd>> {
+    pub fn get_tun_fd_sender(&self) -> Option<mpsc::Sender<MobileTunFdRequest>> {
         self.launcher
             .as_ref()
             .map(|launcher| launcher.data.tun_fd.0.clone())
@@ -541,6 +594,17 @@ impl NetworkConfig {
             }
         }
 
+        if let Some(virtual_ipv6) = self.virtual_ipv6.as_ref().filter(|s| !s.is_empty()) {
+            let addr: cidr::Ipv6Inet = virtual_ipv6
+                .parse()
+                .with_context(|| format!("failed to parse ipv6 inet address: {}", virtual_ipv6))?;
+            cfg.set_ipv6(Some(addr));
+        }
+
+        if let Some(vpn_dns) = self.vpn_dns.as_ref().filter(|s| !s.is_empty()) {
+            cfg.set_vpn_dns(Some(vpn_dns.clone()));
+        }
+
         match NetworkingMethod::try_from(self.networking_method.unwrap_or_default())
             .unwrap_or_default()
         {
@@ -640,6 +704,12 @@ impl NetworkConfig {
             });
         }
 
+        // Manual routes are per-family independent: a v6-only manual list must
+        // not flip the v4 switch, which would replace auto-learned IPv4
+        // routes (peer subnets, VPN portal) with an empty manual set.
+        // An explicitly enabled switch with an empty list keeps the meaning
+        // "manage v4 routes manually, with zero of them" (Some([])), so
+        // auto-learned routes stay out.
         if self.enable_manual_routes.unwrap_or_default() {
             let mut routes = Vec::<cidr::Ipv4Cidr>::with_capacity(self.routes.len());
             for route in self.routes.iter() {
@@ -650,6 +720,21 @@ impl NetworkConfig {
                 );
             }
             cfg.set_routes(Some(routes));
+        }
+
+        // The v6 list is its own switch: non-empty means "manage v6 routes
+        // manually"; None/empty means "do not manage". It never touches the
+        // v4 switch above.
+        if !self.routes_v6.is_empty() {
+            let mut routes = Vec::<cidr::Ipv6Cidr>::with_capacity(self.routes_v6.len());
+            for route in self.routes_v6.iter() {
+                routes.push(
+                    route
+                        .parse()
+                        .with_context(|| format!("failed to parse route v6: {}", route))?,
+                );
+            }
+            cfg.set_routes_v6(Some(routes));
         }
 
         if !self.exit_nodes.is_empty() {
@@ -889,6 +974,12 @@ impl NetworkConfig {
             result.network_length = Some(ipv4.network_length() as i32);
         }
 
+        if let Some(ipv6) = config.get_ipv6() {
+            result.virtual_ipv6 = Some(ipv6.to_string());
+        }
+
+        result.vpn_dns = config.get_vpn_dns().filter(|s| !s.is_empty());
+
         if config.get_ipv6_public_addr_provider() != default_config.get_ipv6_public_addr_provider()
         {
             result.ipv6_public_addr_provider = Some(config.get_ipv6_public_addr_provider());
@@ -949,11 +1040,19 @@ impl NetworkConfig {
             result.vpn_portal_listen_port = Some(vpn_config.wireguard_listen.port() as i32);
         }
 
-        if let Some(routes) = config.get_routes()
-            && !routes.is_empty()
-        {
+        if let Some(routes) = config.get_routes() {
+            // Some([]) is meaningful: manual mode with zero v4 routes. Only
+            // None (never configured) keeps the switch off.
             result.enable_manual_routes = Some(true);
             result.routes = routes.iter().map(|r| r.to_string()).collect();
+        }
+
+        if let Some(routes_v6) = config.get_routes_v6()
+            && !routes_v6.is_empty()
+        {
+            // A v6-only manual list must not imply the v4 switch; readback
+            // keeps enable_manual_routes tied to the v4 list alone.
+            result.routes_v6 = routes_v6.iter().map(|r| r.to_string()).collect();
         }
 
         let exit_nodes = config.get_exit_nodes();
@@ -1034,9 +1133,176 @@ mod tests {
         common::config::{ConfigLoader, process_secure_mode_cfg},
         proto::common::SecureModeConfig,
     };
+    use crate::launcher::NetworkConfig;
     use base64::prelude::{BASE64_STANDARD, Engine as _};
     use rand::Rng;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[tokio::test]
+    async fn test_mobile_tun_fd_request_loop_reports_setup_result() {
+        // The optional completion must carry the real setup outcome. A queued
+        // request alone is never reported as success.
+        use crate::launcher::{MobileTunFdRequest, mobile_tun_fd_request_loop};
+        use futures::future::BoxFuture;
+
+        for expected in [Ok(()), Err("setup failure".to_string())] {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            let expected_clone = expected.clone();
+            let setup = move |_fd: i32| -> BoxFuture<'static, Result<(), anyhow::Error>> {
+                let result = expected_clone.clone();
+                Box::pin(async move {
+                    result.map_err(|e: String| anyhow::anyhow!(e))
+                })
+            };
+
+            let loop_handle = tokio::spawn(async move {
+                mobile_tun_fd_request_loop(rx, setup).await;
+            });
+
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            tx.send(MobileTunFdRequest {
+                fd: Some(7),
+                completion: Some(completion_tx),
+            })
+            .await
+            .unwrap();
+
+            let reported = completion_rx.await.unwrap();
+            assert_eq!(reported, expected);
+
+            // fd: None terminates the loop.
+            tx.send(MobileTunFdRequest { fd: None, completion: None })
+                .await
+                .unwrap();
+            loop_handle.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mobile_tun_fd_request_loop_skips_cancelled_attach() {
+        use super::{mobile_tun_fd_request_loop, MobileTunFdRequest};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let setup_calls = calls.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        drop(completion_rx); // The caller timed out before this attach ran.
+        tx.send(MobileTunFdRequest { fd: Some(7), completion: Some(completion_tx) })
+            .await.unwrap();
+        drop(tx);
+        mobile_tun_fd_request_loop(rx, move |_| {
+            setup_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_routes_v6_only_roundtrip_keeps_v4_none() {
+        // A v6-only manual-route config must not, via the NetworkConfig API
+        // roundtrip, replace auto-learned IPv4 routes with an empty manual
+        // set: v4 routes have to stay None.
+        let toml = r#"
+routes_v6 = [ "fd00::/8" ]
+"#;
+        let config = crate::common::config::TomlConfigLoader::new_from_str(toml).unwrap();
+        assert_eq!(config.get_routes_v6().unwrap().len(), 1);
+        assert!(config.get_routes().is_none());
+
+        let nc = NetworkConfig::new_from_config(&config).unwrap();
+        assert!(
+            !nc.enable_manual_routes.unwrap_or(false),
+            "v6-only list must not flip the v4 manual-routes switch"
+        );
+
+        let cfg2 = nc.gen_config().unwrap();
+        assert!(
+            cfg2.get_routes().is_none(),
+            "v4 manual routes must stay None after the roundtrip"
+        );
+        assert_eq!(cfg2.get_routes_v6().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_manual_v4_empty_routes_roundtrip_keeps_explicit_empty() {
+        // enable_manual_routes + an empty v4 list means "manage v4 routes
+        // manually, with zero of them". The roundtrip must keep Some([])
+        // instead of collapsing to None, which would silently re-enable
+        // auto-learned routes (exit-node default, peer subnets, portal).
+        let config = crate::common::config::TomlConfigLoader::new_from_str("").unwrap();
+        config.set_routes(Some(vec![]));
+        assert!(config.get_routes().unwrap().is_empty());
+
+        let nc = NetworkConfig::new_from_config(&config).unwrap();
+        assert!(
+            nc.enable_manual_routes.unwrap_or(false),
+            "an explicit empty list must keep the manual switch on"
+        );
+
+        let cfg2 = nc.gen_config().unwrap();
+        assert!(
+            cfg2.get_routes().unwrap().is_empty(),
+            "explicit empty manual list must survive the roundtrip as Some([])"
+        );
+    }
+
+    #[test]
+    fn test_dual_stack_v6_and_vpn_dns_roundtrip() {
+        // The Android dual-stack config: static v6 address, both-family exit
+        // nodes, both-family manual routes and the VPN DNS must survive
+        // TOML -> NetworkConfig -> ConfigLoader intact; a config without the
+        // new fields keeps its old IPv4-only meaning.
+        let toml = r#"
+dhcp = false
+ipv4 = "10.126.144.8/24"
+ipv6 = "fd79:68a2:532c::8/64"
+vpn_dns = "10.126.144.1"
+routes = [ "0.0.0.0/0" ]
+routes_v6 = [ "::/0" ]
+exit_nodes = [ "10.126.144.1", "fd79:68a2:532c::1" ]
+"#;
+        let config = crate::common::config::TomlConfigLoader::new_from_str(toml).unwrap();
+        let nc = NetworkConfig::new_from_config(&config).unwrap();
+
+        assert_eq!(nc.virtual_ipv4.as_deref(), Some("10.126.144.8"));
+        assert_eq!(nc.virtual_ipv6.as_deref(), Some("fd79:68a2:532c::8/64"));
+        assert_eq!(nc.vpn_dns.as_deref(), Some("10.126.144.1"));
+        assert_eq!(nc.exit_nodes.len(), 2);
+        assert!(nc.enable_manual_routes.unwrap_or(false));
+        assert_eq!(nc.routes, vec!["0.0.0.0/0".to_string()]);
+        assert_eq!(nc.routes_v6, vec!["::/0".to_string()]);
+
+        let cfg2 = nc.gen_config().unwrap();
+        assert_eq!(
+            cfg2.get_ipv4().map(|a| a.address().to_string()).as_deref(),
+            Some("10.126.144.8")
+        );
+        assert_eq!(
+            cfg2.get_ipv6().map(|a| a.to_string()).as_deref(),
+            Some("fd79:68a2:532c::8/64")
+        );
+        assert_eq!(cfg2.get_vpn_dns().as_deref(), Some("10.126.144.1"));
+        assert_eq!(cfg2.get_exit_nodes().len(), 2);
+        assert_eq!(cfg2.get_routes().unwrap().len(), 1);
+        assert_eq!(cfg2.get_routes_v6().unwrap().len(), 1);
+
+        // Old IPv4-only config: the new fields stay unset and do not alter
+        // existing semantics.
+        let old = crate::common::config::TomlConfigLoader::new_from_str(
+            "dhcp = false\nipv4 = \"10.126.144.9/24\"\n",
+        )
+        .unwrap();
+        let nc_old = NetworkConfig::new_from_config(&old).unwrap();
+        assert!(nc_old.virtual_ipv6.is_none());
+        assert!(nc_old.vpn_dns.is_none());
+        assert!(nc_old.routes_v6.is_empty());
+
+        let cfg_old = nc_old.gen_config().unwrap();
+        assert!(cfg_old.get_ipv6().is_none());
+        assert!(cfg_old.get_vpn_dns().is_none());
+        assert!(cfg_old.get_routes().is_none());
+        assert!(cfg_old.get_routes_v6().is_none());
+    }
 
     fn gen_default_config() -> crate::common::config::TomlConfigLoader {
         let config = crate::common::config::TomlConfigLoader::default();

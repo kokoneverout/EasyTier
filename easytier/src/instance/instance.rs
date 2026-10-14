@@ -10,9 +10,10 @@ use std::time::Duration;
 use anyhow::Context;
 use cidr::{IpCidr, Ipv4Inet};
 use futures::FutureExt;
-use tokio::sync::{Mutex, Notify};
 #[cfg(feature = "tun")]
-use tokio::{sync::oneshot, task::JoinSet};
+use tokio::sync::oneshot;
+use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinSet;
 #[cfg(feature = "magic-dns")]
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -610,6 +611,7 @@ impl InstanceConfigPatcher {
 }
 
 pub struct Instance {
+    ip_config_tasks: JoinSet<()>,
     inst_name: String,
 
     id: uuid::Uuid,
@@ -699,6 +701,7 @@ impl Instance {
         let socks5_server = Socks5Server::new(global_ctx.clone(), peer_manager.clone(), None);
 
         Instance {
+            ip_config_tasks: JoinSet::new(),
             inst_name: global_ctx.inst_name.clone(),
             id,
 
@@ -796,6 +799,11 @@ impl Instance {
             return None;
         }
 
+        #[cfg(target_os = "windows")]
+        if ctx.config.get_vpn_dns().is_some() {
+            return None;
+        }
+
         let runner = DnsRunner::new(
             peer_mgr,
             tun_dev,
@@ -821,14 +829,14 @@ impl Instance {
     }
 
     // Warning, if there is an IP conflict in the network when using DHCP, the IP will be automatically changed.
-    fn check_dhcp_ip_conflict(&self) {
+    fn check_dhcp_ip_conflict(&mut self) {
         use rand::Rng;
         let peer_manager_c = Arc::downgrade(&self.peer_manager.clone());
         let global_ctx_c = self.get_global_ctx();
         #[cfg(feature = "tun")]
         let nic_ctx = self.nic_ctx.clone();
         let _peer_packet_receiver = self.peer_packet_receiver.clone();
-        tokio::spawn(async move {
+        self.ip_config_tasks.spawn(async move {
             let default_ipv4_addr = Ipv4Inet::new(Ipv4Addr::new(10, 126, 126, 0), 24).unwrap();
             let mut current_dhcp_ip: Option<Ipv4Inet> = None;
             let mut next_sleep_time = 0;
@@ -945,7 +953,7 @@ impl Instance {
     }
 
     #[cfg(all(not(mobile), feature = "tun"))]
-    fn check_for_static_ip(&self, first_round_output: oneshot::Sender<Result<(), Error>>) {
+    fn check_for_static_ip(&mut self, first_round_output: oneshot::Sender<Result<(), Error>>) {
         let ipv4_addr = self.global_ctx.get_ipv4();
         let ipv6_addr = self.global_ctx.get_ipv6();
 
@@ -959,7 +967,7 @@ impl Instance {
         let peer_mgr = Arc::downgrade(&self.peer_manager);
         let peer_packet_receiver = self.peer_packet_receiver.clone();
 
-        tokio::spawn(async move {
+        self.ip_config_tasks.spawn(async move {
             let mut output_tx = Some(first_round_output);
             loop {
                 let close_notifier = Arc::new(Notify::new());
@@ -973,6 +981,7 @@ impl Instance {
                         return;
                     };
 
+                    Self::clear_nic_ctx(nic_ctx.clone(), peer_packet_receiver.clone()).await;
                     let mut new_nic_ctx = NicCtx::new(
                         peer_mgr.get_global_ctx(),
                         &peer_mgr,
@@ -1022,6 +1031,23 @@ impl Instance {
     }
 
     pub async fn run(&mut self) -> Result<(), Error> {
+        #[cfg(target_os = "windows")]
+        if let Some(server) = self.global_ctx.config.get_vpn_dns() {
+            server
+                .parse::<IpAddr>()
+                .context("vpn_dns must be an IP address")?;
+            if !cfg!(feature = "tun")
+                || self.global_ctx.no_tun()
+                || (self.global_ctx.get_ipv4().is_none()
+                    && self.global_ctx.get_ipv6().is_none()
+                    && !self.global_ctx.config.get_dhcp())
+            {
+                return Err(anyhow::anyhow!(
+                    "Windows vpn_dns requires a TUN interface with IPv4, IPv6 or DHCP"
+                )
+                .into());
+            }
+        }
         self.prepare_public_ipv6_config().await?;
         self.listener_manager
             .lock()
@@ -1593,14 +1619,17 @@ impl Instance {
     }
 
     pub async fn clear_resources(&mut self) {
-        self.peer_manager.clear_resources().await;
+        self.ip_config_tasks.abort_all();
+        while self.ip_config_tasks.join_next().await.is_some() {}
         #[cfg(feature = "tun")]
         let _ = self.nic_ctx.lock().await.take();
+        self.peer_manager.clear_resources().await;
     }
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        self.ip_config_tasks.abort_all();
         let my_peer_id = self.peer_manager.my_peer_id();
         let pm = Arc::downgrade(&self.peer_manager);
         #[cfg(feature = "tun")]

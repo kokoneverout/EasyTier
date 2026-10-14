@@ -11,7 +11,7 @@ use std::{
 use anyhow::Context;
 use guarden::defer;
 use rand::{Rng, seq::SliceRandom};
-use tokio::{net::UdpSocket, sync::RwLock};
+use tokio::sync::RwLock;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Level;
 
@@ -233,9 +233,9 @@ impl PunchSymToConeHoleClient {
             return Ok(udp_array);
         }
 
-        let udp_array = Arc::new(UdpSocketArray::new(
+        let udp_array = Arc::new(UdpSocketArray::new_with_ctx(
             UDP_ARRAY_SIZE_FOR_HARD_SYM,
-            self.peer_mgr.get_global_ctx().net_ns.clone(),
+            &self.peer_mgr.get_global_ctx(),
         ));
         udp_array.start().await?;
         wlocked.replace(udp_array.clone());
@@ -450,7 +450,13 @@ impl PunchSymToConeHoleClient {
         if self.try_direct_connect.load(Ordering::Relaxed)
             && let Ok(tunnel) = try_connect_with_socket(
                 global_ctx.clone(),
-                Arc::new(UdpSocket::bind("0.0.0.0:0").await?),
+                Arc::new(
+                    crate::common::underlay::bind_udp(
+                        &global_ctx,
+                        remote_mapped_addr.clone().into(),
+                    )
+                    .await?,
+                ),
                 remote_mapped_addr.into(),
             )
             .await

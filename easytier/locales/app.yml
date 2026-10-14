@@ -42,6 +42,9 @@ core_clap:
   ipv6_public_addr_provider:
     en: "share this node's public IPv6 subnet with other peers so they can obtain public IPv6 addresses (Linux only)"
     zh-CN: "将此节点的公网 IPv6 子网共享给其他节点，使它们也能获得公网 IPv6 地址（仅 Linux 支持）"
+  vpn_dns:
+    en: "DNS server IP inside the VPN; on Windows, this instance owns the global DNS policy until stopped (administrator required)"
+    zh-CN: "VPN 内的 DNS 服务器 IP；Windows 上由本实例管理全局 DNS 策略直至停止（需要管理员权限）"
   ipv6_public_addr_auto:
     en: "auto-obtain a public IPv6 address from a peer that shares its IPv6 subnet"
     zh-CN: "自动从共享了 IPv6 子网的对等节点获取一个公网 IPv6 地址"
@@ -149,6 +152,9 @@ core_clap:
   manual_routes:
     en: "assign routes cidr manually, will disable subnet proxy and wireguard routes propagated from peers. e.g.: 192.168.0.0/16"
     zh-CN: "手动分配路由CIDR，将禁用子网代理和从对等节点传播的wireguard路由。例如：192.168.0.0/16"
+  manual_routes_v6:
+    en: "assign ipv6 routes cidr manually, e.g.: fd00::/8. empty means no ipv6 routes are managed"
+    zh-CN: "手动分配IPv6路由CIDR，例如：fd00::/8。为空表示不管理任何IPv6路由"
   relay_network_whitelist:
     en: |+
         only forward traffic from the whitelist networks, supporting wildcard strings, multiple network names can be separated by spaces.

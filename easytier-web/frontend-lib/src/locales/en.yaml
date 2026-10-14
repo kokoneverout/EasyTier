@@ -13,6 +13,16 @@ initial_nodes_help: |
 initial_node_placeholder: "Example: node.example.com"
 virtual_ipv4: Virtual IPv4
 virtual_ipv4_dhcp: DHCP
+virtual_ipv6: Virtual IPv6
+virtual_ipv6_help: |
+  Full static IPv6 CIDR, e.g. fd79:68a2:532c::8/64. Leave empty to keep the
+  IPv4-only behavior. The address is installed on the mobile VPN interface
+  regardless of the DHCP switch.
+vpn_dns: Exit DNS
+vpn_dns_help: |
+  DNS server installed by the mobile VPN layer; a single IPv4 or IPv6 literal
+  (no port, no CIDR prefix). Takes priority over Magic DNS; when empty the
+  Magic DNS switch decides.
 network_name: Network Name
 network_secret: Network Secret
 public_server_url: Public Server URL
@@ -185,6 +195,11 @@ relay_network_whitelist_help: |
 manual_routes: Manual Route
 manual_routes_help: |
   Assign routes cidr manually, will disable subnet proxy and wireguard routes propagated from peers. e.g.:192.168.0.0/16
+
+routes_v6: IPv6 Routes
+routes_v6_help: |
+  Manually assigned IPv6 route CIDRs, e.g. fd00::/8. Independent of the IPv4
+  manual-routes switch; IPv6 CIDRs only (prefix 0-128).
 
 socks5: Socks5 Server
 socks5_help: |
@@ -476,3 +491,42 @@ acl:
     name: Name
     type: Type
   match: Match
+
+app_routing:
+  title: App Routing
+  apply: Apply
+  mode_include: Selected apps only
+  mode_all: All apps
+  include_hint: Selected apps use the current VPN routes and exit; LAN bypass rules stay in effect
+  all_hint: All apps use the current VPN routes and exit; EasyTier itself stays direct
+  search_placeholder: Search app name or package
+  clear_search: Clear
+  clear_selection: Clear selection
+  show_system: Show system services
+  selected_count: '{count} selected'
+  found_count: '{count} found'
+  loading: Reading apps
+  load_failed: Failed to read the app list
+  retry: Retry
+  no_match: No apps found
+  empty_selection_hint: Select at least one app before applying
+  uninstalled_apps: '{count} uninstalled or unavailable apps'
+  uninstalled_label: Uninstalled app
+  legacy_all_note: Currently following the legacy all-apps mode
+  shared_uid_note: These apps share a network identity and are routed together
+  lockdown_note: "System \"Block connections without VPN\" is on: unselected apps may lose connectivity instead of going direct"
+  applying: Applying, please wait
+  status_unapplied: Unapplied changes
+  status_applied: Applied
+  status_next_start: Saved; takes effect on next connect
+  status_applied_with_skipped: Applied; {count} apps unavailable
+  status_restored: Apply failed; previous settings restored
+  status_stopped: Apply failed; VPN stopped, retry available
+  apply_failed: 'Apply failed. Please retry; settings have not been confirmed restored.'
+  apply_failed_empty: 'Cannot apply an empty list: select at least one installed app'
+  discard_confirm: Discard unapplied changes?
+  keep_editing: Keep editing
+  discard: Discard
+  back: Back
+  selected_state_on: will use the VPN
+  selected_state_off: stays on the original network

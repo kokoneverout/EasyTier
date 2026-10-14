@@ -9,7 +9,7 @@ use dashmap::DashSet;
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 use crate::{
-    common::{PeerId, dns::socket_addrs, join_joinset_background},
+    common::{PeerId, dns::peer_socket_addrs, join_joinset_background},
     peers::peer_conn::PeerConnId,
     proto::{
         api::instance::{
@@ -365,7 +365,7 @@ impl ManualConnectorManager {
                 "resolve",
                 Instant::now(),
                 Self::reconnect_timeout(&dead_url),
-                socket_addrs(&converted_dead_url, || Some(1000)),
+                peer_socket_addrs(&converted_dead_url, || Some(1000), &data.global_ctx),
             )
             .await
             {

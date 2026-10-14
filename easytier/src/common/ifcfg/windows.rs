@@ -319,6 +319,49 @@ impl IfConfiguerTrait for WindowsIfConfiger {
         .map_err(|e| anyhow::anyhow!("Failed to delete route: {}", format_win_error(e)))?;
         Ok(())
     }
+
+    async fn check_ipv4_route(&self, name: &str, cidr: cidr::Ipv4Cidr) -> Result<bool, Error> {
+        let Some(if_index) = Self::get_interface_index(name) else {
+            return Err(Error::NotFound);
+        };
+        let luid = InterfaceLuid::luid_from_index(if_index).map_err(|e| {
+            anyhow::anyhow!("Failed to get interface luid: {}", format_win_error(e))
+        })?;
+        match luid.route_ipv4(
+            &Ipv4Inet::new(cidr.first_address(), cidr.network_length()).unwrap(),
+            &Ipv4Addr::UNSPECIFIED,
+        ) {
+            Ok(_) => Ok(true),
+            // 1168 = ERROR_NOT_FOUND: the route definitively does not exist.
+            Err(e) if e as u32 == 1168 => Ok(false),
+            Err(e) => Err(anyhow::anyhow!(
+                "Failed to query route: {}",
+                format_win_error(e)
+            )
+            .into()),
+        }
+    }
+
+    async fn check_ipv6_route(&self, name: &str, cidr: cidr::Ipv6Cidr) -> Result<bool, Error> {
+        let Some(if_index) = Self::get_interface_index(name) else {
+            return Err(Error::NotFound);
+        };
+        let luid = InterfaceLuid::luid_from_index(if_index).map_err(|e| {
+            anyhow::anyhow!("Failed to get interface luid: {}", format_win_error(e))
+        })?;
+        match luid.route_ipv6(
+            &Ipv6Inet::new(cidr.first_address(), cidr.network_length()).unwrap(),
+            &Ipv6Addr::UNSPECIFIED,
+        ) {
+            Ok(_) => Ok(true),
+            Err(e) if e as u32 == 1168 => Ok(false),
+            Err(e) => Err(anyhow::anyhow!(
+                "Failed to query route: {}",
+                format_win_error(e)
+            )
+            .into()),
+        }
+    }
 }
 
 pub struct RegistryManager;

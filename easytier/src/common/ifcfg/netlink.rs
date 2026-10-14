@@ -600,6 +600,28 @@ impl IfConfiguerTrait for NetlinkIfConfiger {
 
         Ok(())
     }
+
+    async fn check_ipv4_route(&self, name: &str, cidr: cidr::Ipv4Cidr) -> Result<bool, Error> {
+        let ifidx = NetlinkIfConfiger::get_interface_index(name)?;
+        let routes = Self::list_routes()?;
+        Ok(routes.iter().any(|msg| {
+            let r: Route = msg.clone().into();
+            r.destination == IpAddr::V4(cidr.first_address())
+                && r.prefix == cidr.network_length()
+                && r.ifindex == Some(ifidx)
+        }))
+    }
+
+    async fn check_ipv6_route(&self, name: &str, cidr: cidr::Ipv6Cidr) -> Result<bool, Error> {
+        let ifidx = NetlinkIfConfiger::get_interface_index(name)?;
+        let routes = Self::list_ipv6_route_messages()?;
+        Ok(routes.iter().any(|msg| {
+            let r: Route = msg.clone().into();
+            r.destination == IpAddr::V6(cidr.first_address())
+                && r.prefix == cidr.network_length()
+                && r.ifindex == Some(ifidx)
+        }))
+    }
 }
 
 #[cfg(test)]

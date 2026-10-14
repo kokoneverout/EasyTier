@@ -90,10 +90,20 @@ async fn try_connect_to_remote(
 
     let mut connector =
         TcpTunnelConnector::new(format!("tcp://{}", a_mapped_addr).parse().unwrap());
-    connector.set_bind_addrs(vec![bind_addr_for_port(
-        local_port,
-        a_mapped_addr.is_ipv6(),
-    )]);
+    let ctx = peer_mgr.get_global_ctx();
+    let sources = if crate::common::underlay::uses_bound_underlay(&ctx) {
+        crate::common::underlay::sources_for_dst(&ctx, a_mapped_addr)
+            .await?
+            .into_iter()
+            .map(|mut addr| {
+                addr.set_port(local_port);
+                addr
+            })
+            .collect()
+    } else {
+        vec![bind_addr_for_port(local_port, a_mapped_addr.is_ipv6())]
+    };
+    connector.set_bind_addrs(sources);
 
     let start = tokio::time::Instant::now();
     let mut attempts: u32 = 0;

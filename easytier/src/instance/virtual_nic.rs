@@ -41,6 +41,9 @@ use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
 use zerocopy::{NativeEndian, NetworkEndian};
 
 #[cfg(target_os = "windows")]
+use anyhow::Context as _;
+
+#[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
 
 pin_project! {
@@ -795,6 +798,8 @@ impl VirtualNic {
 }
 
 pub struct NicCtx {
+    #[cfg(target_os = "windows")]
+    exit_dns: Option<super::windows_exit_dns::WindowsExitDns>,
     global_ctx: ArcGlobalCtx,
     peer_mgr: Weak<PeerManager>,
     peer_packet_receiver: Arc<Mutex<PacketRecvChanReceiver>>,
@@ -816,6 +821,8 @@ impl NicCtx {
         close_notifier: Arc<Notify>,
     ) -> Self {
         NicCtx {
+            #[cfg(target_os = "windows")]
+            exit_dns: None,
             global_ctx: global_ctx.clone(),
             peer_mgr: Arc::downgrade(peer_manager),
             peer_packet_receiver,
@@ -1043,12 +1050,15 @@ impl NicCtx {
         ifname: &str,
         net_ns: &crate::common::netns::NetNS,
         cur_proxy_cidrs: &mut BTreeSet<cidr::Ipv4Cidr>,
+        pending_removals: &mut BTreeSet<cidr::Ipv4Cidr>,
         added: Vec<cidr::Ipv4Cidr>,
         removed: Vec<cidr::Ipv4Cidr>,
     ) {
         tracing::debug!(?added, ?removed, "applying proxy_cidrs route changes");
 
-        // Remove routes
+        // Remove routes. A failed removal stays in `pending_removals` and is
+        // retried by the reconciliation loop; it never comes back to
+        // `cur_proxy_cidrs`, which tracks the desired state only.
         for cidr in removed {
             if !cur_proxy_cidrs.contains(&cidr) {
                 continue;
@@ -1058,18 +1068,27 @@ impl NicCtx {
                 .remove_ipv4_route(ifname, cidr.first_address(), cidr.network_length())
                 .await;
 
-            if ret.is_err() {
-                tracing::trace!(
-                    cidr = ?cidr,
-                    err = ?ret,
-                    "remove route failed.",
-                );
-            }
             cur_proxy_cidrs.remove(&cidr);
+            match ret {
+                Ok(()) => {
+                    pending_removals.remove(&cidr);
+                    tracing::info!(cidr = ?cidr, "ipv4 route removed");
+                }
+                Err(e) => {
+                    pending_removals.insert(cidr);
+                    tracing::info!(cidr = ?cidr, err = ?e, "remove ipv4 route failed, will retry");
+                }
+            }
         }
 
-        // Add routes
+        // Add routes. A failed add still enters the desired set; the
+        // reconciliation loop re-attempts it by comparing against the OS.
         for cidr in added {
+            // A route re-entering the desired set cancels any pending delete
+            // retry unconditionally: that retry would otherwise remove a
+            // route just asked for again, even if this add reports that the
+            // route already exists.
+            pending_removals.remove(&cidr);
             if cur_proxy_cidrs.contains(&cidr) {
                 continue;
             }
@@ -1078,14 +1097,66 @@ impl NicCtx {
                 .add_ipv4_route(ifname, cidr.first_address(), cidr.network_length(), None)
                 .await;
 
-            if ret.is_err() {
-                tracing::trace!(
-                    cidr = ?cidr,
-                    err = ?ret,
-                    "add route failed.",
-                );
-            }
             cur_proxy_cidrs.insert(cidr);
+            match ret {
+                Ok(()) => tracing::info!(cidr = ?cidr, "ipv4 route installed"),
+                Err(e) => {
+                    tracing::info!(cidr = ?cidr, err = ?e, "add ipv4 route failed, will retry")
+                }
+            }
+        }
+    }
+
+    /// Periodic reconciliation between the desired route set and the OS.
+    /// Query failures are treated as "unknown", never as "route missing".
+    async fn reconcile_ipv4_routes(
+        ifcfg: &impl IfConfiguerTrait,
+        ifname: &str,
+        net_ns: &crate::common::netns::NetNS,
+        desired: &BTreeSet<cidr::Ipv4Cidr>,
+        pending_removals: &mut BTreeSet<cidr::Ipv4Cidr>,
+    ) {
+        for cidr in desired.iter() {
+            let present = {
+                // The presence check must run in the same namespace the
+                // routes live in, like the add/remove calls around it.
+                let _g = net_ns.guard();
+                match ifcfg.check_ipv4_route(ifname, *cidr).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(cidr = ?cidr, err = ?e, "ipv4 route presence check failed, skipping cycle");
+                        continue;
+                    }
+                }
+            };
+            if !present {
+                let _g = net_ns.guard();
+                match ifcfg
+                    .add_ipv4_route(ifname, cidr.first_address(), cidr.network_length(), None)
+                    .await
+                {
+                    Ok(()) => tracing::info!(cidr = ?cidr, "ipv4 route re-installed (was missing)"),
+                    Err(e) => {
+                        tracing::info!(cidr = ?cidr, err = ?e, "ipv4 route re-install failed")
+                    }
+                }
+            }
+        }
+
+        for cidr in pending_removals.clone().iter() {
+            let _g = net_ns.guard();
+            match ifcfg
+                .remove_ipv4_route(ifname, cidr.first_address(), cidr.network_length())
+                .await
+            {
+                Ok(()) => {
+                    pending_removals.remove(cidr);
+                    tracing::info!(cidr = ?cidr, "ipv4 route removal retried ok");
+                }
+                Err(e) => {
+                    tracing::debug!(cidr = ?cidr, err = ?e, "ipv4 route removal retry failed")
+                }
+            }
         }
     }
 
@@ -1127,6 +1198,109 @@ impl NicCtx {
         }
     }
 
+    async fn apply_routes_v6_changes(
+        ifcfg: &impl IfConfiguerTrait,
+        ifname: &str,
+        net_ns: &crate::common::netns::NetNS,
+        cur_routes: &mut BTreeSet<cidr::Ipv6Cidr>,
+        pending_removals: &mut BTreeSet<cidr::Ipv6Cidr>,
+        added: Vec<cidr::Ipv6Cidr>,
+        removed: Vec<cidr::Ipv6Cidr>,
+    ) {
+        tracing::debug!(?added, ?removed, "applying manual ipv6 route changes");
+
+        for cidr in removed {
+            if !cur_routes.contains(&cidr) {
+                continue;
+            }
+            let _g = net_ns.guard();
+            let ret = ifcfg
+                .remove_ipv6_route(ifname, cidr.first_address(), cidr.network_length())
+                .await;
+            cur_routes.remove(&cidr);
+            match ret {
+                Ok(()) => {
+                    pending_removals.remove(&cidr);
+                    tracing::info!(cidr = ?cidr, "ipv6 route removed");
+                }
+                Err(e) => {
+                    pending_removals.insert(cidr);
+                    tracing::info!(cidr = ?cidr, err = ?e, "remove ipv6 route failed, will retry");
+                }
+            }
+        }
+
+        for cidr in added {
+            // Same as v4: re-entering the desired set cancels a stale delete
+            // retry regardless of the add result below.
+            pending_removals.remove(&cidr);
+            if cur_routes.contains(&cidr) {
+                continue;
+            }
+            let _g = net_ns.guard();
+            let ret = ifcfg
+                .add_ipv6_route(ifname, cidr.first_address(), cidr.network_length(), None)
+                .await;
+            cur_routes.insert(cidr);
+            match ret {
+                Ok(()) => tracing::info!(cidr = ?cidr, "ipv6 route installed"),
+                Err(e) => {
+                    tracing::info!(cidr = ?cidr, err = ?e, "add ipv6 route failed, will retry")
+                }
+            }
+        }
+    }
+
+    async fn reconcile_ipv6_routes(
+        ifcfg: &impl IfConfiguerTrait,
+        ifname: &str,
+        net_ns: &crate::common::netns::NetNS,
+        desired: &BTreeSet<cidr::Ipv6Cidr>,
+        pending_removals: &mut BTreeSet<cidr::Ipv6Cidr>,
+    ) {
+        for cidr in desired.iter() {
+            let present = {
+                // Same as v4: check inside the namespace the routes live in.
+                let _g = net_ns.guard();
+                match ifcfg.check_ipv6_route(ifname, *cidr).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(cidr = ?cidr, err = ?e, "ipv6 route presence check failed, skipping cycle");
+                        continue;
+                    }
+                }
+            };
+            if !present {
+                let _g = net_ns.guard();
+                match ifcfg
+                    .add_ipv6_route(ifname, cidr.first_address(), cidr.network_length(), None)
+                    .await
+                {
+                    Ok(()) => tracing::info!(cidr = ?cidr, "ipv6 route re-installed (was missing)"),
+                    Err(e) => {
+                        tracing::info!(cidr = ?cidr, err = ?e, "ipv6 route re-install failed")
+                    }
+                }
+            }
+        }
+
+        for cidr in pending_removals.clone().iter() {
+            let _g = net_ns.guard();
+            match ifcfg
+                .remove_ipv6_route(ifname, cidr.first_address(), cidr.network_length())
+                .await
+            {
+                Ok(()) => {
+                    pending_removals.remove(cidr);
+                    tracing::info!(cidr = ?cidr, "ipv6 route removal retried ok");
+                }
+                Err(e) => {
+                    tracing::debug!(cidr = ?cidr, err = ?e, "ipv6 route removal retry failed")
+                }
+            }
+        }
+    }
+
     async fn run_proxy_cidrs_route_updater(&mut self) -> Result<(), Error> {
         let Some(peer_mgr) = self.peer_mgr.upgrade() else {
             return Err(anyhow::anyhow!("peer manager not available").into());
@@ -1140,6 +1314,9 @@ impl NicCtx {
 
         self.tasks.spawn(async move {
             let mut cur_proxy_cidrs = BTreeSet::<cidr::Ipv4Cidr>::new();
+            let mut pending_removals = BTreeSet::<cidr::Ipv4Cidr>::new();
+            let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
             // Initial sync: get current proxy_cidrs state and apply routes
             let (_, added, removed) = ProxyCidrsMonitor::diff_proxy_cidrs(
@@ -1153,31 +1330,45 @@ impl NicCtx {
                 &ifname,
                 &net_ns,
                 &mut cur_proxy_cidrs,
+                &mut pending_removals,
                 added,
                 removed,
             )
             .await;
 
             loop {
-                let event = match event_receiver.recv().await {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::debug!("event bus closed, stopping proxy_cidrs route updater");
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        tracing::warn!(
-                            "event bus lagged in proxy_cidrs route updater, doing full sync"
-                        );
-                        event_receiver = event_receiver.resubscribe();
-                        // Full sync after lagged to recover consistent state
-                        let (_, added, removed) = ProxyCidrsMonitor::diff_proxy_cidrs(
-                            peer_mgr.as_ref(),
-                            &global_ctx,
+                let event = tokio::select! {
+                    ev = event_receiver.recv() => match ev {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::debug!("event bus closed, stopping proxy_cidrs route updater");
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            tracing::warn!(
+                                "event bus lagged in proxy_cidrs route updater, doing full sync"
+                            );
+                            event_receiver = event_receiver.resubscribe();
+                            // Full sync after lagged to recover consistent state
+                            let (_, added, removed) = ProxyCidrsMonitor::diff_proxy_cidrs(
+                                peer_mgr.as_ref(),
+                                &global_ctx,
+                                &cur_proxy_cidrs,
+                            )
+                            .await;
+                            GlobalCtxEvent::ProxyCidrsUpdated(added, removed)
+                        }
+                    },
+                    _ = reconcile_interval.tick() => {
+                        Self::reconcile_ipv4_routes(
+                            &ifcfg,
+                            &ifname,
+                            &net_ns,
                             &cur_proxy_cidrs,
+                            &mut pending_removals,
                         )
                         .await;
-                        GlobalCtxEvent::ProxyCidrsUpdated(added, removed)
+                        continue;
                     }
                 };
 
@@ -1192,6 +1383,85 @@ impl NicCtx {
                     &ifname,
                     &net_ns,
                     &mut cur_proxy_cidrs,
+                    &mut pending_removals,
+                    added,
+                    removed,
+                )
+                .await;
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn run_routes_v6_updater(&mut self) -> Result<(), Error> {
+        let global_ctx = self.global_ctx.clone();
+        let net_ns = self.global_ctx.net_ns.clone();
+        let nic = self.nic.lock().await;
+        let ifcfg = nic.get_ifcfg();
+        let ifname = nic.ifname().to_owned();
+        let mut event_receiver = global_ctx.subscribe();
+
+        self.tasks.spawn(async move {
+            let mut cur_routes = BTreeSet::<cidr::Ipv6Cidr>::new();
+            let mut pending_removals = BTreeSet::<cidr::Ipv6Cidr>::new();
+            let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            // Initial sync: apply manual routes_v6 from config
+            let (_, added, removed) =
+                ProxyCidrsMonitor::diff_routes_v6(&global_ctx, &cur_routes).await;
+            Self::apply_routes_v6_changes(
+                &ifcfg,
+                &ifname,
+                &net_ns,
+                &mut cur_routes,
+                &mut pending_removals,
+                added,
+                removed,
+            )
+            .await;
+
+            loop {
+                let event = tokio::select! {
+                    ev = event_receiver.recv() => match ev {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::debug!("event bus closed, stopping routes_v6 route updater");
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            tracing::warn!("event bus lagged in routes_v6 route updater, doing full sync");
+                            event_receiver = event_receiver.resubscribe();
+                            let (_, added, removed) =
+                                ProxyCidrsMonitor::diff_routes_v6(&global_ctx, &cur_routes).await;
+                            GlobalCtxEvent::RoutesV6Updated(added, removed)
+                        }
+                    },
+                    _ = reconcile_interval.tick() => {
+                        Self::reconcile_ipv6_routes(
+                            &ifcfg,
+                            &ifname,
+                            &net_ns,
+                            &cur_routes,
+                            &mut pending_removals,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                let (added, removed) = match event {
+                    GlobalCtxEvent::RoutesV6Updated(added, removed) => (added, removed),
+                    _ => continue,
+                };
+
+                Self::apply_routes_v6_changes(
+                    &ifcfg,
+                    &ifname,
+                    &net_ns,
+                    &mut cur_routes,
+                    &mut pending_removals,
                     added,
                     removed,
                 )
@@ -1338,6 +1608,17 @@ impl NicCtx {
         ipv4_addr: Option<cidr::Ipv4Inet>,
         ipv6_addr: Option<cidr::Ipv6Inet>,
     ) -> Result<(), Error> {
+        #[cfg(target_os = "windows")]
+        let exit_dns_server = self
+            .global_ctx
+            .config
+            .get_vpn_dns()
+            .map(|server| {
+                server
+                    .parse::<std::net::IpAddr>()
+                    .with_context(|| format!("invalid vpn_dns IP address: {server}"))
+            })
+            .transpose()?;
         let tunnel = {
             let mut nic = self.nic.lock().await;
             match nic.create_dev().await {
@@ -1390,10 +1671,23 @@ impl NicCtx {
         }
 
         self.run_proxy_cidrs_route_updater().await?;
+        self.run_routes_v6_updater().await?;
         self.run_public_ipv6_route_updater().await?;
         // Keep the updater running so runtime config patches can enable auto mode
         // without recreating the NIC.
         self.run_public_ipv6_addr_updater().await?;
+
+        #[cfg(target_os = "windows")]
+        if let Some(server) = exit_dns_server {
+            let ifname = self
+                .ifname()
+                .await
+                .context("exit DNS requires a TUN interface")?;
+            self.exit_dns = Some(
+                super::windows_exit_dns::start(&ifname, self.global_ctx.get_id(), server)
+                    .context("failed to configure Windows exit DNS")?,
+            );
+        }
 
         Ok(())
     }
@@ -1422,6 +1716,15 @@ impl NicCtx {
         self.do_forward_peers_to_nic(sink);
 
         Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for NicCtx {
+    fn drop(&mut self) {
+        // Undo the system-wide resolver policy while forwarding and TUN still
+        // exist. Field destruction then aborts the route and forwarding tasks.
+        drop(self.exit_dns.take());
     }
 }
 
@@ -1459,5 +1762,93 @@ mod tests {
         //     let tmp = EthernetPacket::new(tmp.get_bytes());
         //     println!("ret: {:?}", tmp.unwrap());
         // }
+    }
+
+    #[tokio::test]
+    async fn test_routes_pending_delete_cancelled_on_re_add() {
+        use crate::common::ifcfg::IfConfiguerTrait;
+        use crate::common::netns::NetNS;
+        use std::collections::BTreeSet;
+        use std::net::Ipv4Addr;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct MockIfCfg {
+            fail_remove: AtomicBool,
+            fail_add: AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl IfConfiguerTrait for MockIfCfg {
+            async fn add_ipv4_route(
+                &self,
+                _name: &str,
+                _address: Ipv4Addr,
+                _cidr_prefix: u8,
+                _cost: Option<i32>,
+            ) -> Result<(), Error> {
+                if self.fail_add.load(Ordering::SeqCst) {
+                    return Err(anyhow::anyhow!("mock add failure").into());
+                }
+                Ok(())
+            }
+
+            async fn remove_ipv4_route(
+                &self,
+                _name: &str,
+                _address: Ipv4Addr,
+                _cidr_prefix: u8,
+            ) -> Result<(), Error> {
+                if self.fail_remove.load(Ordering::SeqCst) {
+                    return Err(anyhow::anyhow!("mock remove failure").into());
+                }
+                Ok(())
+            }
+        }
+
+        let ifcfg = MockIfCfg {
+            fail_remove: AtomicBool::new(true),
+            fail_add: AtomicBool::new(false),
+        };
+        let ns = NetNS::new(None);
+        let mut cur = BTreeSet::new();
+        let mut pending = BTreeSet::new();
+        let cidr: cidr::Ipv4Cidr = "1.2.3.0/24".parse().unwrap();
+        cur.insert(cidr);
+
+        // 1. The route leaves the desired set and the OS removal fails:
+        //    the delete must be queued for retry by the reconcile loop.
+        super::NicCtx::apply_route_changes(
+            &ifcfg,
+            "et",
+            &ns,
+            &mut cur,
+            &mut pending,
+            vec![],
+            vec![cidr],
+        )
+        .await;
+        assert!(cur.is_empty());
+        assert!(pending.contains(&cidr), "failed removal must be queued");
+
+        // 2. The route re-enters the desired set. Even when the add also
+        //    fails (e.g. the route still exists in the OS), the stale delete
+        //    intent must be cancelled so reconcile cannot remove a route
+        //    that is desired again.
+        ifcfg.fail_add.store(true, Ordering::SeqCst);
+        super::NicCtx::apply_route_changes(
+            &ifcfg,
+            "et",
+            &ns,
+            &mut cur,
+            &mut pending,
+            vec![cidr],
+            vec![],
+        )
+        .await;
+        assert!(cur.contains(&cidr));
+        assert!(
+            !pending.contains(&cidr),
+            "re-entering the desired set must cancel the pending delete"
+        );
     }
 }

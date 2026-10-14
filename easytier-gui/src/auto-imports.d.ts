@@ -10,6 +10,8 @@ declare global {
   const MenuItemExit: typeof import('./composables/tray')['MenuItemExit']
   const MenuItemShow: typeof import('./composables/tray')['MenuItemShow']
   const acceptHMRUpdate: typeof import('pinia')['acceptHMRUpdate']
+  const applyAppRoutingPolicy: typeof import('./composables/mobile_vpn')['applyAppRoutingPolicy']
+  const cachedIcon: typeof import('./composables/app_routing')['cachedIcon']
   const collectNetworkInfo: typeof import('./composables/backend')['collectNetworkInfo']
   const computed: typeof import('vue')['computed']
   const createApp: typeof import('vue')['createApp']
@@ -19,7 +21,11 @@ declare global {
   const defineComponent: typeof import('vue')['defineComponent']
   const defineStore: typeof import('pinia')['defineStore']
   const deleteNetworkInstance: typeof import('./composables/backend')['deleteNetworkInstance']
+  const dropIconCache: typeof import('./composables/app_routing')['dropIconCache']
   const effectScope: typeof import('vue')['effectScope']
+  const ensureAppRoutingPolicyInitialized: typeof import('./composables/app_routing')['ensureAppRoutingPolicyInitialized']
+  const fetchAppCatalog: typeof import('./composables/app_routing')['fetchAppCatalog']
+  const fetchAppIcon: typeof import('./composables/app_routing')['fetchAppIcon']
   const generateMenuItem: typeof import('./composables/tray')['generateMenuItem']
   const generateNetworkConfig: typeof import('./composables/backend')['generateNetworkConfig']
   const getActivePinia: typeof import('pinia')['getActivePinia']
@@ -40,9 +46,11 @@ declare global {
   const isReactive: typeof import('vue')['isReactive']
   const isReadonly: typeof import('vue')['isReadonly']
   const isRef: typeof import('vue')['isRef']
+  const isVpnRunning: typeof import('./composables/mobile_vpn')['isVpnRunning']
   const isWebClientConnected: typeof import('./composables/backend')['isWebClientConnected']
   const listNetworkInstanceIds: typeof import('./composables/backend')['listNetworkInstanceIds']
   const listenGlobalEvents: typeof import('./composables/event')['listenGlobalEvents']
+  const loadIcon: typeof import('./composables/app_routing')['loadIcon']
   const loadLastNetworkInstanceId: typeof import('./composables/config')['loadLastNetworkInstanceId']
   const loadMode: typeof import('./composables/mode')['loadMode']
   const mapActions: typeof import('pinia')['mapActions']
@@ -51,6 +59,7 @@ declare global {
   const mapStores: typeof import('pinia')['mapStores']
   const mapWritableState: typeof import('pinia')['mapWritableState']
   const markRaw: typeof import('vue')['markRaw']
+  const netParamsChanged: typeof import('./composables/vpn_reconcile_logic')['netParamsChanged']
   const nextTick: typeof import('vue')['nextTick']
   const onActivated: typeof import('vue')['onActivated']
   const onBeforeMount: typeof import('vue')['onBeforeMount']
@@ -75,7 +84,9 @@ declare global {
   const reactive: typeof import('vue')['reactive']
   const readonly: typeof import('vue')['readonly']
   const ref: typeof import('vue')['ref']
+  const resetAppRoutingPolicyInit: typeof import('./composables/app_routing')['resetAppRoutingPolicyInit']
   const resolveComponent: typeof import('vue')['resolveComponent']
+  const routingSignature: typeof import('./composables/vpn_reconcile_logic')['routingSignature']
   const runNetworkInstance: typeof import('./composables/backend')['runNetworkInstance']
   const saveLastNetworkInstanceId: typeof import('./composables/config')['saveLastNetworkInstanceId']
   const saveMode: typeof import('./composables/mode')['saveMode']
@@ -92,6 +103,7 @@ declare global {
   const shallowReactive: typeof import('vue')['shallowReactive']
   const shallowReadonly: typeof import('vue')['shallowReadonly']
   const shallowRef: typeof import('vue')['shallowRef']
+  const shouldRebuildVpn: typeof import('./composables/vpn_reconcile_logic')['shouldRebuildVpn']
   const storeToRefs: typeof import('pinia')['storeToRefs']
   const syncMobileVpnService: typeof import('./composables/mobile_vpn')['syncMobileVpnService']
   const toRaw: typeof import('vue')['toRaw']
@@ -114,6 +126,7 @@ declare global {
   const useTemplateRef: typeof import('vue')['useTemplateRef']
   const useTray: typeof import('./composables/tray')['useTray']
   const validateConfig: typeof import('./composables/backend')['validateConfig']
+  const vpnServiceError: typeof import('./composables/mobile_vpn')['vpnServiceError']
   const watch: typeof import('vue')['watch']
   const watchEffect: typeof import('vue')['watchEffect']
   const watchPostEffect: typeof import('vue')['watchPostEffect']
@@ -135,6 +148,8 @@ declare module 'vue' {
     readonly MenuItemExit: UnwrapRef<typeof import('./composables/tray')['MenuItemExit']>
     readonly MenuItemShow: UnwrapRef<typeof import('./composables/tray')['MenuItemShow']>
     readonly acceptHMRUpdate: UnwrapRef<typeof import('pinia')['acceptHMRUpdate']>
+    readonly applyAppRoutingPolicy: UnwrapRef<typeof import('./composables/mobile_vpn')['applyAppRoutingPolicy']>
+    readonly cachedIcon: UnwrapRef<typeof import('./composables/app_routing')['cachedIcon']>
     readonly collectNetworkInfo: UnwrapRef<typeof import('./composables/backend')['collectNetworkInfo']>
     readonly computed: UnwrapRef<typeof import('vue')['computed']>
     readonly createApp: UnwrapRef<typeof import('vue')['createApp']>
@@ -144,7 +159,11 @@ declare module 'vue' {
     readonly defineComponent: UnwrapRef<typeof import('vue')['defineComponent']>
     readonly defineStore: UnwrapRef<typeof import('pinia')['defineStore']>
     readonly deleteNetworkInstance: UnwrapRef<typeof import('./composables/backend')['deleteNetworkInstance']>
+    readonly dropIconCache: UnwrapRef<typeof import('./composables/app_routing')['dropIconCache']>
     readonly effectScope: UnwrapRef<typeof import('vue')['effectScope']>
+    readonly ensureAppRoutingPolicyInitialized: UnwrapRef<typeof import('./composables/app_routing')['ensureAppRoutingPolicyInitialized']>
+    readonly fetchAppCatalog: UnwrapRef<typeof import('./composables/app_routing')['fetchAppCatalog']>
+    readonly fetchAppIcon: UnwrapRef<typeof import('./composables/app_routing')['fetchAppIcon']>
     readonly generateMenuItem: UnwrapRef<typeof import('./composables/tray')['generateMenuItem']>
     readonly generateNetworkConfig: UnwrapRef<typeof import('./composables/backend')['generateNetworkConfig']>
     readonly getActivePinia: UnwrapRef<typeof import('pinia')['getActivePinia']>
@@ -165,9 +184,11 @@ declare module 'vue' {
     readonly isReactive: UnwrapRef<typeof import('vue')['isReactive']>
     readonly isReadonly: UnwrapRef<typeof import('vue')['isReadonly']>
     readonly isRef: UnwrapRef<typeof import('vue')['isRef']>
+    readonly isVpnRunning: UnwrapRef<typeof import('./composables/mobile_vpn')['isVpnRunning']>
     readonly isWebClientConnected: UnwrapRef<typeof import('./composables/backend')['isWebClientConnected']>
     readonly listNetworkInstanceIds: UnwrapRef<typeof import('./composables/backend')['listNetworkInstanceIds']>
     readonly listenGlobalEvents: UnwrapRef<typeof import('./composables/event')['listenGlobalEvents']>
+    readonly loadIcon: UnwrapRef<typeof import('./composables/app_routing')['loadIcon']>
     readonly loadLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['loadLastNetworkInstanceId']>
     readonly loadMode: UnwrapRef<typeof import('./composables/mode')['loadMode']>
     readonly mapActions: UnwrapRef<typeof import('pinia')['mapActions']>
@@ -176,6 +197,7 @@ declare module 'vue' {
     readonly mapStores: UnwrapRef<typeof import('pinia')['mapStores']>
     readonly mapWritableState: UnwrapRef<typeof import('pinia')['mapWritableState']>
     readonly markRaw: UnwrapRef<typeof import('vue')['markRaw']>
+    readonly netParamsChanged: UnwrapRef<typeof import('./composables/vpn_reconcile_logic')['netParamsChanged']>
     readonly nextTick: UnwrapRef<typeof import('vue')['nextTick']>
     readonly onActivated: UnwrapRef<typeof import('vue')['onActivated']>
     readonly onBeforeMount: UnwrapRef<typeof import('vue')['onBeforeMount']>
@@ -200,7 +222,9 @@ declare module 'vue' {
     readonly reactive: UnwrapRef<typeof import('vue')['reactive']>
     readonly readonly: UnwrapRef<typeof import('vue')['readonly']>
     readonly ref: UnwrapRef<typeof import('vue')['ref']>
+    readonly resetAppRoutingPolicyInit: UnwrapRef<typeof import('./composables/app_routing')['resetAppRoutingPolicyInit']>
     readonly resolveComponent: UnwrapRef<typeof import('vue')['resolveComponent']>
+    readonly routingSignature: UnwrapRef<typeof import('./composables/vpn_reconcile_logic')['routingSignature']>
     readonly runNetworkInstance: UnwrapRef<typeof import('./composables/backend')['runNetworkInstance']>
     readonly saveLastNetworkInstanceId: UnwrapRef<typeof import('./composables/config')['saveLastNetworkInstanceId']>
     readonly saveMode: UnwrapRef<typeof import('./composables/mode')['saveMode']>
@@ -217,6 +241,7 @@ declare module 'vue' {
     readonly shallowReactive: UnwrapRef<typeof import('vue')['shallowReactive']>
     readonly shallowReadonly: UnwrapRef<typeof import('vue')['shallowReadonly']>
     readonly shallowRef: UnwrapRef<typeof import('vue')['shallowRef']>
+    readonly shouldRebuildVpn: UnwrapRef<typeof import('./composables/vpn_reconcile_logic')['shouldRebuildVpn']>
     readonly storeToRefs: UnwrapRef<typeof import('pinia')['storeToRefs']>
     readonly syncMobileVpnService: UnwrapRef<typeof import('./composables/mobile_vpn')['syncMobileVpnService']>
     readonly toRaw: UnwrapRef<typeof import('vue')['toRaw']>
@@ -239,6 +264,7 @@ declare module 'vue' {
     readonly useTemplateRef: UnwrapRef<typeof import('vue')['useTemplateRef']>
     readonly useTray: UnwrapRef<typeof import('./composables/tray')['useTray']>
     readonly validateConfig: UnwrapRef<typeof import('./composables/backend')['validateConfig']>
+    readonly vpnServiceError: UnwrapRef<typeof import('./composables/mobile_vpn')['vpnServiceError']>
     readonly watch: UnwrapRef<typeof import('vue')['watch']>
     readonly watchEffect: UnwrapRef<typeof import('vue')['watchEffect']>
     readonly watchPostEffect: UnwrapRef<typeof import('vue')['watchPostEffect']>

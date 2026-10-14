@@ -219,6 +219,12 @@ pub trait ConfigLoader: Send + Sync {
     fn get_routes(&self) -> Option<Vec<cidr::Ipv4Cidr>>;
     fn set_routes(&self, routes: Option<Vec<cidr::Ipv4Cidr>>);
 
+    fn get_routes_v6(&self) -> Option<Vec<cidr::Ipv6Cidr>>;
+    fn set_routes_v6(&self, routes: Option<Vec<cidr::Ipv6Cidr>>);
+
+    fn get_vpn_dns(&self) -> Option<String>;
+    fn set_vpn_dns(&self, dns: Option<String>);
+
     fn get_socks5_portal(&self) -> Option<url::Url>;
     fn set_socks5_portal(&self, addr: Option<url::Url>);
 
@@ -530,6 +536,7 @@ struct Config {
     instance_id: Option<uuid::Uuid>,
     ipv4: Option<String>,
     ipv6: Option<String>,
+    vpn_dns: Option<String>,
     ipv6_public_addr_provider: Option<bool>,
     ipv6_public_addr_auto: Option<bool>,
     ipv6_public_addr_prefix: Option<String>,
@@ -545,6 +552,8 @@ struct Config {
     vpn_portal_config: Option<VpnPortalConfig>,
 
     routes: Option<Vec<cidr::Ipv4Cidr>>,
+
+    routes_v6: Option<Vec<cidr::Ipv6Cidr>>,
 
     socks5_proxy: Option<url::Url>,
 
@@ -928,6 +937,22 @@ impl ConfigLoader for TomlConfigLoader {
         self.config.lock().unwrap().routes = routes;
     }
 
+    fn get_routes_v6(&self) -> Option<Vec<cidr::Ipv6Cidr>> {
+        self.config.lock().unwrap().routes_v6.clone()
+    }
+
+    fn set_routes_v6(&self, routes: Option<Vec<cidr::Ipv6Cidr>>) {
+        self.config.lock().unwrap().routes_v6 = routes;
+    }
+
+    fn get_vpn_dns(&self) -> Option<String> {
+        self.config.lock().unwrap().vpn_dns.clone()
+    }
+
+    fn set_vpn_dns(&self, dns: Option<String>) {
+        self.config.lock().unwrap().vpn_dns = dns;
+    }
+
     fn get_socks5_portal(&self) -> Option<url::Url> {
         self.config.lock().unwrap().socks5_proxy.clone()
     }
@@ -1258,6 +1283,58 @@ pub mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_routes_v6_config_roundtrip() {
+        let config = TomlConfigLoader::default();
+        assert_eq!(config.get_routes_v6(), None);
+
+        let r1: cidr::Ipv6Cidr = "fd79:68a2:532c::/64".parse().unwrap();
+        let r2: cidr::Ipv6Cidr = "2607:f2d8:1:3c::3/128".parse().unwrap();
+        config.set_routes_v6(Some(vec![r1, r2]));
+        assert_eq!(config.get_routes_v6(), Some(vec![r1, r2]));
+
+        // v4 routes must be unaffected by v6 accessors and vice versa
+        assert_eq!(config.get_routes(), None);
+
+        let dumped = config.dump();
+        assert!(dumped.contains("routes_v6"));
+        let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
+        assert_eq!(loaded.get_routes_v6(), Some(vec![r1, r2]));
+        assert_eq!(loaded.get_routes(), None);
+    }
+
+    #[test]
+    fn test_old_config_without_routes_v6_still_parses() {
+        let config_str = r#"
+ipv4 = "10.147.0.2"
+routes = [ "192.168.0.0/16" ]
+"#;
+        let config = TomlConfigLoader::new_from_str(config_str).unwrap();
+        assert_eq!(config.get_routes_v6(), None);
+        assert_eq!(config.get_routes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_routes_v6_invalid_prefix_rejected() {
+        // prefix longer than 128
+        let too_long = r#"
+routes_v6 = [ "fd79::/129" ]
+"#;
+        assert!(TomlConfigLoader::new_from_str(too_long).is_err());
+
+        // host bits set must be rejected: fd79:68a2:532c::1 is a host inside /64
+        let host_bits = r#"
+routes_v6 = [ "fd79:68a2:532c::1/64" ]
+"#;
+        assert!(TomlConfigLoader::new_from_str(host_bits).is_err());
+
+        // v4 syntax in the v6 field must be rejected
+        let wrong_family = r#"
+routes_v6 = [ "192.168.0.0/16" ]
+"#;
+        assert!(TomlConfigLoader::new_from_str(wrong_family).is_err());
+    }
 
     #[test]
     fn test_stun_servers_config() {

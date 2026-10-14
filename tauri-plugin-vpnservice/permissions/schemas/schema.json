@@ -295,6 +295,42 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the get_app_icon command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-app-icon",
+          "markdownDescription": "Enables the get_app_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_app_icon command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-app-icon",
+          "markdownDescription": "Denies the get_app_icon command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_app_routing_policy command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-app-routing-policy",
+          "markdownDescription": "Enables the get_app_routing_policy command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_app_routing_policy command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-app-routing-policy",
+          "markdownDescription": "Denies the get_app_routing_policy command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_installed_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-installed-apps",
+          "markdownDescription": "Enables the get_installed_apps command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_installed_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-installed-apps",
+          "markdownDescription": "Denies the get_installed_apps command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_vpn_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-vpn-status",
@@ -353,6 +389,42 @@
           "type": "string",
           "const": "deny-register-listener",
           "markdownDescription": "Denies the register_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-remove-listener",
+          "markdownDescription": "Enables the remove_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-remove-listener",
+          "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_app_routing_page_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-app-routing-page-open",
+          "markdownDescription": "Enables the set_app_routing_page_open command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_app_routing_page_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-app-routing-page-open",
+          "markdownDescription": "Denies the set_app_routing_page_open command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_app_routing_policy command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-app-routing-policy",
+          "markdownDescription": "Enables the set_app_routing_policy command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_app_routing_policy command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-app-routing-policy",
+          "markdownDescription": "Denies the set_app_routing_policy command without any pre-configured scope."
         },
         {
           "description": "Enables the start_vpn command without any pre-configured scope.",

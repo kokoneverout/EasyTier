@@ -88,6 +88,12 @@ export interface NetworkConfig {
   dhcp: boolean
   virtual_ipv4: string
   network_length: number
+  // Full static IPv6 CIDR, e.g. fd79:68a2:532c::8/64. Empty/undefined keeps
+  // the previous IPv4-only behavior.
+  virtual_ipv6?: string
+  // DNS server the mobile VPN layer installs (IPv4 or IPv6). Takes priority
+  // over Magic DNS on mobile.
+  vpn_dns?: string
   hostname?: string
   network_name: string
   network_secret?: string
@@ -142,6 +148,7 @@ export interface NetworkConfig {
 
   enable_manual_routes: boolean
   routes: string[]
+  routes_v6: string[]
 
   exit_nodes: string[]
 
@@ -218,6 +225,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     relay_network_whitelist: [],
     enable_manual_routes: false,
     routes: [],
+    routes_v6: [],
     exit_nodes: [],
     enable_socks5: false,
     socks5_port: 1080,
@@ -243,10 +251,141 @@ function cleanPeerUrls(urls: string[] | undefined): string[] {
   return (urls ?? []).map((url) => url.trim()).filter((url) => url.length > 0)
 }
 
+// --- dual-stack value helpers (pure, shared by forms and tests) -------------
+
+function ipv6GroupsFromParts(parts: string[]): number[] | null {
+  const groups: number[] = []
+  for (const part of parts) {
+    if (part.includes('.')) {
+      // Embedded IPv4 (e.g. ::ffff:192.0.2.1) counts as two groups.
+      if (!/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(part)) return null
+      const v4 = part.split('.').map(Number)
+      if (v4.length !== 4 || v4.some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
+        return null
+      }
+      groups.push((v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3])
+      continue
+    }
+    if (!/^[0-9a-fA-F]{1,4}$/.test(part)) {
+      return null
+    }
+    groups.push(Number.parseInt(part, 16))
+  }
+  return groups
+}
+
+/** Parses an IPv6 address into 8 numeric 16-bit groups, or null. */
+export function parseIpv6Groups(addr: string): number[] | null {
+  const s = addr.trim()
+  if (!s.includes(':')) {
+    return null
+  }
+  if (s.includes('.')) {
+    const parts = s.split(':')
+    // An embedded IPv4 literal can only occupy the final 32 address bits.
+    if (!parts[parts.length - 1]?.includes('.') || parts.filter(part => part.includes('.')).length !== 1) return null
+  }
+  const doubleColonCount = (s.match(/::/g) ?? []).length
+  if (doubleColonCount > 1) {
+    return null
+  }
+
+  let headParts: string[] = []
+  let tailParts: string[] = []
+  if (doubleColonCount === 1) {
+    const sides = s.split('::')
+    headParts = sides[0].length ? sides[0].split(':') : []
+    tailParts = sides[1].length ? sides[1].split(':') : []
+  } else {
+    headParts = s.split(':')
+  }
+
+  const headGroups = ipv6GroupsFromParts(headParts)
+  const tailGroups = ipv6GroupsFromParts(tailParts)
+  if (!headGroups || !tailGroups) {
+    return null
+  }
+
+  if (doubleColonCount === 0) {
+    return headGroups.length === 8 ? headGroups : null
+  }
+  if (headGroups.length + tailGroups.length > 7) {
+    // "::" must stand for at least one zero group.
+    return null
+  }
+  const zeros = new Array<number>(8 - headGroups.length - tailGroups.length).fill(0)
+  return [...headGroups, ...zeros, ...tailGroups]
+}
+
+/**
+ * Validates an IPv6 CIDR ("addr/prefix", prefix 0-128). Rejects IPv4.
+ * Host bits are intentionally not inspected: node addresses keep them.
+ */
+export function isValidIpv6Cidr(value: string): boolean {
+  const trimmed = value.trim()
+  const slash = trimmed.lastIndexOf('/')
+  if (slash === -1) {
+    return false
+  }
+  const addr = trimmed.slice(0, slash)
+  const prefixStr = trimmed.slice(slash + 1)
+  if (!/^\d{1,3}$/.test(prefixStr)) {
+    return false
+  }
+  const prefix = Number.parseInt(prefixStr, 10)
+  if (prefix < 0 || prefix > 128) {
+    return false
+  }
+  return parseIpv6Groups(addr) !== null
+}
+
+/**
+ * Normalizes a network-route IPv6 CIDR to its network address (host bits
+ * cleared). Returns null for invalid input. Node address fields must NOT use
+ * this — they keep host bits.
+ */
+export function normalizeIpv6RouteCidr(value: string): string | null {
+  const trimmed = value.trim()
+  if (!isValidIpv6Cidr(trimmed)) {
+    return null
+  }
+  const slash = trimmed.lastIndexOf('/')
+  const groups = parseIpv6Groups(trimmed.slice(0, slash))!
+  const prefix = Number.parseInt(trimmed.slice(slash + 1), 10)
+  for (let g = 0; g < 8; g++) {
+    const bitsIntoGroup = prefix - g * 16
+    if (bitsIntoGroup <= 0) {
+      groups[g] = 0
+    } else if (bitsIntoGroup < 16) {
+      groups[g] &= (0xffff << (16 - bitsIntoGroup)) & 0xffff
+    }
+  }
+  return `${groups.map(g => g.toString(16)).join(':')}/${prefix}`
+}
+
+/** Single IPv4 or IPv6 literal (no port, no prefix). */
+export function isValidIpLiteral(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return false
+  }
+  if (trimmed.includes(':')) {
+    return parseIpv6Groups(trimmed) !== null
+  }
+  if (!/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(trimmed)) return false
+  const v4 = trimmed.split('.').map(Number)
+  return v4.length === 4 && v4.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
+}
+
+
 export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
   const normalized: NetworkConfig = {
     ...config,
     peer_urls: cleanPeerUrls(config.peer_urls),
+    // Missing array fields default to empty arrays; other known values pass
+    // through untouched via the spread above.
+    routes: config.routes ?? [],
+    routes_v6: config.routes_v6 ?? [],
   }
 
   const publicServerUrl = normalized.public_server_url?.trim() ?? ''

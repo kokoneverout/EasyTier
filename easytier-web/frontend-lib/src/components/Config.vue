@@ -5,11 +5,14 @@ import InputGroupAddon from 'primevue/inputgroupaddon'
 import {
   addRow,
   DEFAULT_NETWORK_CONFIG,
+  isValidIpLiteral,
+  isValidIpv6Cidr,
+  normalizeIpv6RouteCidr,
   NetworkConfig,
   normalizeNetworkConfig,
   removeRow
 } from '../types/network'
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AclManager from './acl/AclManager.vue'
 import UrlListInput from './UrlListInput.vue'
@@ -62,6 +65,37 @@ function searchExitNodesSuggestions(e: { query: string }) {
   const ret = []
   ret.push(e.query)
   exitNodesSuggestions.value = ret
+}
+
+// Dual-stack helpers. Suggestions only echo what the user typed; validation
+// comes from the actual parsers (no 0-128 autocomplete enumeration).
+const routesV6Suggestions = ref([''])
+
+function searchRoutesV6Suggestions(e: { query: string }) {
+  routesV6Suggestions.value = [e.query]
+}
+
+const virtualIpv6Invalid = computed(() => {
+  const value = curNetwork.value.virtual_ipv6?.trim()
+  return !!value && !isValidIpv6Cidr(value)
+})
+
+const vpnDnsInvalid = computed(() => {
+  const value = curNetwork.value.vpn_dns?.trim()
+  return !!value && !isValidIpLiteral(value)
+})
+
+const invalidRoutesV6 = computed(() =>
+  curNetwork.value.routes_v6.filter(r => !isValidIpv6Cidr(r.trim())),
+)
+
+function onRoutesV6Change() {
+  // Normalize network routes (clear host bits); invalid entries pass through
+  // untouched so the user sees and fixes them.
+  curNetwork.value.routes_v6 = curNetwork.value.routes_v6.map((r) => {
+    const normalized = normalizeIpv6RouteCidr(r)
+    return normalized ?? r
+  })
 }
 
 const whitelistSuggestions = ref([''])
@@ -190,6 +224,27 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                       inputId="horizontal-buttons" showButtons :step="1" mode="decimal" :min="1" :max="32" fluid
                       class="max-w-20" />
                   </InputGroup>
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex items-center">
+                    <label for="virtual_ipv6">{{ t('virtual_ipv6') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('virtual_ipv6_help')"></span>
+                  </div>
+                  <InputText id="virtual_ipv6" v-model="curNetwork.virtual_ipv6" placeholder="fd79:68a2:532c::8/64"
+                    :invalid="virtualIpv6Invalid" aria-describedby="virtual_ipv6-help" />
+                  <small v-if="virtualIpv6Invalid" class="p-error">{{ t('virtual_ipv6_help') }}</small>
+                </div>
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex items-center">
+                    <label for="vpn_dns">{{ t('vpn_dns') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('vpn_dns_help')"></span>
+                  </div>
+                  <InputText id="vpn_dns" v-model="curNetwork.vpn_dns" placeholder="10.126.144.1"
+                    :invalid="vpnDnsInvalid" aria-describedby="vpn_dns-help" />
+                  <small v-if="vpnDnsInvalid" class="p-error">{{ t('vpn_dns_help') }}</small>
                 </div>
               </div>
 
@@ -357,6 +412,20 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                         :suggestions="inetSuggestions" @complete="searchInetSuggestions" />
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap ">
+                <div class="flex flex-col gap-2 grow">
+                  <div class="flex">
+                    <label for="routes_v6">{{ t('routes_v6') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('routes_v6_help')"></span>
+                  </div>
+                  <!-- Independent of the IPv4 enable_manual_routes switch. -->
+                  <AutoComplete id="routes_v6" v-model="curNetwork.routes_v6"
+                    :placeholder="t('chips_placeholder', ['fd79:68a2:532c::/48'])" class="w-full" multiple fluid
+                    :suggestions="routesV6Suggestions" @complete="searchRoutesV6Suggestions" @change="onRoutesV6Change" />
+                  <small v-if="invalidRoutesV6.length" class="p-error">{{ invalidRoutesV6.join(', ') }}</small>
                 </div>
               </div>
 

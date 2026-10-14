@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::Context;
-use tokio::net::UdpSocket;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
@@ -113,7 +112,7 @@ impl PunchConeHoleClient {
         let tid = rand::random();
 
         let global_ctx = self.peer_mgr.get_global_ctx();
-        let udp_array = UdpSocketArray::new(1, global_ctx.net_ns.clone());
+        let udp_array = UdpSocketArray::new_with_ctx(1, &global_ctx);
 
         let rpc_stub = self
             .peer_mgr
@@ -141,10 +140,10 @@ impl PunchConeHoleClient {
             "select_punch_listener response missing listener_mapped_addr"
         ))?;
 
-        let local_socket = {
-            let _g = self.peer_mgr.get_global_ctx().net_ns.guard();
-            Arc::new(UdpSocket::bind("0.0.0.0:0").await?)
-        };
+        let local_socket = Arc::new(
+            crate::common::underlay::bind_udp(&global_ctx, remote_mapped_addr.clone().into())
+                .await?,
+        );
         let local_addr = local_socket
             .local_addr()
             .with_context(|| "failed to get local addr from udp punch socket")?;

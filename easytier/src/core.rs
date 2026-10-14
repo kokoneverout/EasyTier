@@ -173,6 +173,13 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_VPN_DNS",
+        help = t!("core_clap.vpn_dns").to_string()
+    )]
+    vpn_dns: Option<IpAddr>,
+
+    #[arg(
+        long,
         env = "ET_IPV6_PUBLIC_ADDR_PROVIDER",
         help = t!("core_clap.ipv6_public_addr_provider").to_string(),
         num_args = 0..=1,
@@ -408,6 +415,15 @@ struct NetworkOptions {
         num_args = 0..
     )]
     manual_routes: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        env = "ET_MANUAL_ROUTES_V6",
+        value_delimiter = ',',
+        help = t!("core_clap.manual_routes_v6").to_string(),
+        num_args = 0..
+    )]
+    manual_routes_v6: Option<Vec<String>>,
 
     // if not in relay_network_whitelist:
     // for foreign virtual network, will refuse the incoming connection
@@ -909,6 +925,10 @@ impl NetworkOptions {
             })?))
         }
 
+        if let Some(vpn_dns) = self.vpn_dns {
+            cfg.set_vpn_dns(Some(vpn_dns.to_string()));
+        }
+
         if let Some(enabled) = self.ipv6_public_addr_provider {
             cfg.set_ipv6_public_addr_provider(enabled);
         }
@@ -1006,6 +1026,17 @@ impl NetworkOptions {
                 );
             }
             cfg.set_routes(Some(routes));
+        }
+
+        if let Some(manual_routes_v6) = self.manual_routes_v6.as_ref() {
+            let mut routes = Vec::<cidr::Ipv6Cidr>::with_capacity(manual_routes_v6.len());
+            for r in manual_routes_v6 {
+                routes.push(
+                    r.parse()
+                        .with_context(|| format!("failed to parse route v6: {}", r))?,
+                );
+            }
+            cfg.set_routes_v6(Some(routes));
         }
 
         #[cfg(feature = "socks5")]
@@ -1236,10 +1267,10 @@ fn win_service_event_loop(
     use tokio::runtime::Runtime;
     use windows_service::service::*;
 
-    let normal_status = ServiceStatus {
+    let stopped_status = ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),
@@ -1258,24 +1289,26 @@ fn win_service_event_loop(
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            tokio::select! {
-                res = run_main(cli) => {
-                    match res {
-                        Ok(_) => {
-                            status_handle.set_service_status(normal_status).unwrap();
-                            std::process::exit(0);
-                        }
-                        Err(error) => {
-                            status_handle.set_service_status(error_status).unwrap();
-                            log::error!(?error);
-                        }
-                    }
-                },
-                _ = stop_notify.notified() => {
-                    _ = status_handle.set_service_status(normal_status);
-                    std::process::exit(0);
-                }
-            }
+            let shutdown = async {
+                stop_notify.notified().await;
+                let _ = status_handle.set_service_status(ServiceStatus {
+                    current_state: ServiceState::StopPending,
+                    checkpoint: 1,
+                    wait_hint: Duration::from_secs(15),
+                    ..stopped_status.clone()
+                });
+            };
+            // run_main stops and joins every launcher before returning.
+            let result = run_main(cli, shutdown).await;
+            let exit_code = if let Err(error) = result {
+                log::error!(?error);
+                let _ = status_handle.set_service_status(error_status);
+                1
+            } else {
+                let _ = status_handle.set_service_status(stopped_status);
+                0
+            };
+            std::process::exit(exit_code);
         });
     });
 }
@@ -1331,11 +1364,35 @@ fn win_service_main(arg: Vec<std::ffi::OsString>) {
     win_service_event_loop(stop_notify_recv, cli, status_handle);
 }
 
-async fn run_main(cli: Cli) -> anyhow::Result<()> {
+async fn run_main(cli: Cli, shutdown: impl std::future::Future<Output = ()>) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
 
+    // Register before starting instances: NSSM may send Ctrl+C while startup
+    // is still installing routes and DNS. Keep that notification for shutdown.
+    #[cfg(windows)]
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(any(windows, unix))]
+    let interrupt = interrupt.recv();
+    #[cfg(not(any(windows, unix)))]
+    let interrupt = std::future::pending::<()>();
+
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let sigterm = sigterm.recv();
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
     let manager = Arc::new(NetworkInstanceManager::new().with_config_path(cli.config_dir.clone()));
+    // Launchers run on their own runtimes. Dropping the last manager Arc is not
+    // enough: RPC and monitoring tasks also retain it. Stop and join explicitly.
+    let shutdown_manager = manager.clone();
+    defer! {
+        let _ = shutdown_manager.retain_network_instance(Vec::new());
+    }
 
     let _rpc_server = ApiRpcServer::new(
         cli.rpc_portal_options.rpc_portal,
@@ -1472,13 +1529,6 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         manager.run_network_instance(cfg, true, ConfigFileControl::STATIC_CONFIG)?;
     }
 
-    #[cfg(unix)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    #[cfg(unix)]
-    let sigterm = sigterm.recv();
-    #[cfg(not(unix))]
-    let sigterm = std::future::pending::<()>();
-
     tokio::select! {
         _ = manager.wait() => {
             let infos = manager.collect_network_infos().await?;
@@ -1488,8 +1538,12 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
                 return Err(anyhow::anyhow!("some instances stopped with errors"));
             }
         }
-        _ = tokio::signal::ctrl_c() => {
+        _ = interrupt => {
             log::info!("ctrl-c received, exiting...");
+        }
+
+        _ = shutdown => {
+            log::info!("service stop received, exiting...");
         }
 
         _ = sigterm, if cfg!(unix) => {
@@ -1605,7 +1659,7 @@ pub async fn main() -> ExitCode {
 
     let mut ret_code = 0;
 
-    if let Err(error) = run_main(cli).await {
+    if let Err(error) = run_main(cli, std::future::pending()).await {
         log::error!(?error);
         ret_code = 1;
     }

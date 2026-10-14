@@ -156,19 +156,24 @@ async fn set_logging_level(level: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn set_tun_fd(fd: i32) -> Result<(), String> {
+async fn set_tun_fd(fd: i32, instance_id: Option<String>) -> Result<(), String> {
     let Some(instance_manager) = INSTANCE_MANAGER.read().await.clone() else {
         return Err("set_tun_fd is not supported in remote mode".to_string());
     };
-    if let Some(uuid) = get_client_manager!()?
-        .get_enabled_instances_with_tun_ids()
-        .next()
-    {
-        instance_manager
-            .set_tun_fd(&uuid, fd)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    // Explicit target wins; otherwise fall back to the single running TUN
+    // instance. Failing to find a target is an error, not a silent no-op.
+    let uuid = match instance_id {
+        Some(id) => id
+            .parse()
+            .map_err(|e: uuid::Error| e.to_string())?,
+        None => get_client_manager!()?
+            .get_enabled_instances_with_tun_ids()
+            .next()
+            .ok_or_else(|| "no running tun instance to inject fd".to_string())?,
+    };
+    instance_manager
+        .set_tun_fd_and_wait(&uuid, fd, std::time::Duration::from_secs(10))
+        .await
 }
 
 #[tauri::command]

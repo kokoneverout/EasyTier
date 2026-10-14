@@ -77,6 +77,8 @@ pub enum GlobalCtxEvent {
 
     ProxyCidrsUpdated(Vec<cidr::Ipv4Cidr>, Vec<cidr::Ipv4Cidr>), // (added, removed)
 
+    RoutesV6Updated(Vec<cidr::Ipv6Cidr>, Vec<cidr::Ipv6Cidr>), // (added, removed)
+
     UdpBroadcastRelayStartResult {
         capture_backend: Option<String>,
         error: Option<String>,
@@ -212,6 +214,7 @@ pub struct GlobalCtx {
     cached_proxy_cidrs: AtomicCell<Option<Vec<ProxyNetworkConfig>>>,
 
     ip_collector: Mutex<Option<Arc<IPCollector>>>,
+    underlay_dns: std::sync::OnceLock<Arc<super::dns::UnderlayResolver>>,
 
     hostname: Mutex<String>,
 
@@ -329,6 +332,7 @@ impl GlobalCtx {
                 net_ns,
                 stun_info_collector.clone(),
             )))),
+            underlay_dns: std::sync::OnceLock::new(),
 
             hostname: Mutex::new(hostname),
 
@@ -486,8 +490,15 @@ impl GlobalCtx {
         self.get_network_identity().network_name
     }
 
-    pub fn get_ip_collector(&self) -> Arc<IPCollector> {
+    pub fn get_ip_collector(self: &Arc<Self>) -> Arc<IPCollector> {
+        self.get_stun_info_collector();
         self.ip_collector.lock().unwrap().as_ref().unwrap().clone()
+    }
+
+    pub fn get_underlay_dns(self: &Arc<Self>) -> Arc<super::dns::UnderlayResolver> {
+        self.underlay_dns
+            .get_or_init(|| Arc::new(super::dns::new_underlay_resolver(Arc::downgrade(self))))
+            .clone()
     }
 
     pub fn get_hostname(&self) -> String {
@@ -498,8 +509,10 @@ impl GlobalCtx {
         *self.hostname.lock().unwrap() = hostname;
     }
 
-    pub fn get_stun_info_collector(&self) -> Arc<dyn StunInfoCollectorTrait> {
-        self.stun_info_collection.lock().unwrap().clone()
+    pub fn get_stun_info_collector(self: &Arc<Self>) -> Arc<dyn StunInfoCollectorTrait> {
+        let collector = self.stun_info_collection.lock().unwrap().clone();
+        collector.set_global_ctx(Arc::downgrade(self));
+        collector
     }
 
     pub fn replace_stun_info_collector(&self, collector: Box<dyn StunInfoCollectorTrait>) {

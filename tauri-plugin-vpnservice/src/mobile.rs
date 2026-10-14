@@ -46,7 +46,7 @@ impl<R: Runtime> Vpnservice<R> {
             .map_err(Into::into)
     }
 
-    pub fn stop_vpn(&self, payload: VoidRequest) -> crate::Result<Status> {
+    pub fn stop_vpn(&self, payload: StopVpnRequest) -> crate::Result<Status> {
         self.0
             .run_mobile_plugin("stop_vpn", payload)
             .map_err(Into::into)
@@ -55,6 +55,36 @@ impl<R: Runtime> Vpnservice<R> {
     pub fn get_vpn_status(&self, payload: VoidRequest) -> crate::Result<VpnStatus> {
         self.0
             .run_mobile_plugin("get_vpn_status", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn get_installed_apps(&self, payload: VoidRequest) -> crate::Result<AppCatalogResponse> {
+        self.0
+            .run_mobile_plugin("get_installed_apps", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn get_app_icon(&self, payload: GetAppIconRequest) -> crate::Result<AppIconResponse> {
+        self.0
+            .run_mobile_plugin("get_app_icon", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn get_app_routing_policy(
+        &self,
+        payload: VoidRequest,
+    ) -> crate::Result<GetAppRoutingPolicyResponse> {
+        self.0
+            .run_mobile_plugin("get_app_routing_policy", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn set_app_routing_policy(
+        &self,
+        payload: SetAppRoutingPolicyRequest,
+    ) -> crate::Result<AppRoutingPolicyResult> {
+        self.0
+            .run_mobile_plugin("set_app_routing_policy", payload)
             .map_err(Into::into)
     }
 }

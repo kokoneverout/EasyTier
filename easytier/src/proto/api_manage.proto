@@ -101,6 +101,11 @@ message NetworkConfig {
   optional string ipv6_public_addr_prefix = 64;
   optional bool disable_relay_data = 65;
   optional bool enable_udp_broadcast_relay = 66;
+  repeated string routes_v6 = 67;
+  // Full static IPv6 CIDR for the node, e.g. fd79:68a2:532c::8/64.
+  optional string virtual_ipv6 = 68;
+  // DNS server the mobile VPN layer should install (IPv4 or IPv6).
+  optional string vpn_dns = 69;
 }
 
 message PortForwardConfig {

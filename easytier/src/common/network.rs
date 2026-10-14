@@ -49,6 +49,15 @@ impl InterfaceFilter {
             .any(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
     }
 
+    async fn is_ppp_device(&self) -> bool {
+        let path = format!("/sys/class/net/{}/type", self.iface.name);
+        tokio::fs::read_to_string(path)
+            .await
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            == Some(nix::libc::ARPHRD_PPP as u32)
+    }
+
     async fn filter_iface(&self) -> bool {
         tracing::trace!(
             "filter linux iface: {:?}, is_point_to_point: {}, is_loopback: {}, is_up: {}, is_lower_up: {}, is_tun: {}, has_valid_ip: {}",
@@ -61,7 +70,9 @@ impl InterfaceFilter {
             self.has_valid_ip().await
         );
 
-        !self.iface.is_point_to_point()
+        // PPPoE is a valid WAN underlay. Keep other point-to-point devices
+        // excluded, and still exclude TUN/TAP using their kernel marker.
+        (!self.iface.is_point_to_point() || self.is_ppp_device().await)
             && !self.iface.is_loopback()
             && self.iface.is_up()
             && self.iface.is_lower_up()

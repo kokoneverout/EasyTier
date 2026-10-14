@@ -12,6 +12,7 @@ use crate::tunnel::{
 use anyhow::Context;
 use derivative::Derivative;
 use derive_more::{Deref, DerefMut};
+use futures::stream::FuturesUnordered;
 use parking_lot::RwLock;
 use quinn::{
     ClientConfig, ConnectError, Connection, Endpoint, EndpointConfig, ServerConfig,
@@ -456,6 +457,8 @@ impl QuicEndpointManager {
 
 struct ConnWrapper {
     conn: Connection,
+    // Bound client endpoints are not retained by the shared endpoint pool.
+    _endpoint: Endpoint,
 }
 
 impl Drop for ConnWrapper {
@@ -492,7 +495,10 @@ impl QuicTunnelListener {
         let remote_addr = conn.remote_address();
         let (w, r) = conn.accept_bi().await.with_context(|| "accept_bi failed")?;
 
-        let arc_conn = Arc::new(ConnWrapper { conn });
+        let arc_conn = Arc::new(ConnWrapper {
+            conn,
+            _endpoint: self.endpoint.as_ref().unwrap().clone(),
+        });
 
         let info = TunnelInfo {
             tunnel_type: "quic".to_owned(),
@@ -558,6 +564,7 @@ impl TunnelListener for QuicTunnelListener {
 pub struct QuicTunnelConnector {
     addr: url::Url,
     global_ctx: ArcGlobalCtx,
+    bind_addrs: Vec<SocketAddr>,
     ip_version: IpVersion,
     resolved_addr: Option<SocketAddr>,
 }
@@ -567,9 +574,40 @@ impl QuicTunnelConnector {
         QuicTunnelConnector {
             addr,
             global_ctx,
+            bind_addrs: Vec::new(),
             ip_version: IpVersion::Both,
             resolved_addr: None,
         }
+    }
+
+    async fn connect_with_custom_bind(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(Endpoint, Connection), TunnelError> {
+        let futures = FuturesUnordered::new();
+        for &source in self
+            .bind_addrs
+            .iter()
+            .filter(|source| source.is_ipv4() == addr.is_ipv4() && !source.ip().is_unspecified())
+        {
+            futures.push(async move {
+                // Never reuse a wildcard/listener endpoint for a bound connection.
+                let endpoint = QuicEndpointManager::try_create(source, false)
+                    .with_context(|| format!("failed to bind QUIC source {source}"))?;
+                let connection = endpoint
+                    .connect(addr, "localhost")
+                    .with_context(|| format!("failed to connect QUIC from {source} to {addr}"))?
+                    .await
+                    .with_context(|| format!("failed to connect QUIC from {source} to {addr}"))?;
+                Ok::<_, TunnelError>((endpoint, connection))
+            });
+        }
+        if futures.is_empty() {
+            return Err(TunnelError::InvalidAddr(format!(
+                "no QUIC bind address for {addr}"
+            )));
+        }
+        super::common::wait_for_connect_futures(futures).await
     }
 }
 
@@ -580,7 +618,11 @@ impl TunnelConnector for QuicTunnelConnector {
             Some(addr) => addr,
             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
         };
-        let (endpoint, connection) = QuicEndpointManager::connect(&self.global_ctx, addr).await?;
+        let (endpoint, connection) = if self.bind_addrs.is_empty() {
+            QuicEndpointManager::connect(&self.global_ctx, addr).await?
+        } else {
+            self.connect_with_custom_bind(addr).await?
+        };
 
         let local_addr = endpoint.local_addr()?;
 
@@ -601,7 +643,10 @@ impl TunnelConnector for QuicTunnelConnector {
             ),
         };
 
-        let arc_conn = Arc::new(ConnWrapper { conn: connection });
+        let arc_conn = Arc::new(ConnWrapper {
+            conn: connection,
+            _endpoint: endpoint,
+        });
         Ok(Box::new(TunnelWrapper::new(
             FramedReader::new_with_associate_data(r, 4500, Some(Box::new(arc_conn.clone()))),
             FramedWriter::new_with_associate_data(w, Some(Box::new(arc_conn))),
@@ -611,6 +656,10 @@ impl TunnelConnector for QuicTunnelConnector {
 
     fn remote_url(&self) -> url::Url {
         self.addr.clone()
+    }
+
+    fn set_bind_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.bind_addrs = addrs;
     }
 
     fn set_ip_version(&mut self, ip_version: IpVersion) {
@@ -641,6 +690,71 @@ mod tests {
     fn global_ctx() -> ArcGlobalCtx {
         let identity = crate::common::config::NetworkIdentity::default();
         get_mock_global_ctx_with_network(Some(identity))
+    }
+
+    async fn assert_bound_source(source: SocketAddr) {
+        let mut listener = QuicTunnelListener::new(
+            super::super::build_url_from_socket_addr(&source.to_string(), "quic"),
+            global_ctx(),
+        );
+        listener.listen().await.unwrap();
+        let endpoint = listener.endpoint.as_ref().unwrap().clone();
+        let accepted = tokio::spawn(async move { endpoint.accept().await.unwrap().await.unwrap() });
+        let mut connector = QuicTunnelConnector::new(listener.local_url(), global_ctx());
+        // An unavailable source must not prevent another physical source from winning.
+        let unavailable = if source.is_ipv4() {
+            "192.0.2.1:0".parse().unwrap()
+        } else {
+            "[2001:db8::1]:0".parse().unwrap()
+        };
+        connector.set_bind_addrs(vec![unavailable, source]);
+        let tunnel = tokio::time::timeout(Duration::from_secs(5), connector.connect())
+            .await
+            .unwrap()
+            .unwrap();
+        let server_connection = accepted.await.unwrap();
+        let local = url::Url::from(tunnel.info().unwrap().local_addr.unwrap());
+        let local = SocketAddr::from_url(local, IpVersion::Both).await.unwrap();
+        assert_eq!(local.ip(), source.ip());
+        assert_eq!(server_connection.remote_address().ip(), source.ip());
+    }
+
+    #[test]
+    fn bound_source_ipv4() {
+        RUNTIME.block_on(assert_bound_source("127.0.0.1:0".parse().unwrap()));
+    }
+
+    #[test]
+    fn bound_source_ipv6() {
+        RUNTIME.block_on(assert_bound_source("[::1]:0".parse().unwrap()));
+    }
+
+    #[test]
+    fn bound_source_failure_does_not_fall_back_to_unbound_endpoint() {
+        RUNTIME.block_on(async {
+            let mut connector =
+                QuicTunnelConnector::new("quic://127.0.0.1:9".parse().unwrap(), global_ctx());
+            connector.set_bind_addrs(vec!["192.0.2.1:0".parse().unwrap()]);
+            let err = tokio::time::timeout(Duration::from_secs(2), connector.connect())
+                .await
+                .expect("invalid source should fail before attempting an unbound connection")
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("192.0.2.1"));
+        });
+    }
+
+    #[test]
+    fn bound_source_wrong_family_does_not_fall_back() {
+        RUNTIME.block_on(async {
+            let mut connector =
+                QuicTunnelConnector::new("quic://127.0.0.1:9".parse().unwrap(), global_ctx());
+            connector.set_bind_addrs(vec!["[::1]:0".parse().unwrap()]);
+            let err = tokio::time::timeout(Duration::from_secs(2), connector.connect())
+                .await
+                .expect("address family mismatch should fail without sending")
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("no QUIC bind address"));
+        });
     }
 
     fn stopped_client_endpoint() -> (Endpoint, SocketAddr) {

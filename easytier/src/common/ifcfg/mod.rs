@@ -64,6 +64,19 @@ pub trait IfConfiguerTrait: Send + Sync {
     ) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Route presence check used by the route reconciliation loop.
+    /// Ok(true) = the route exists on the interface; Ok(false) = definitively
+    /// absent; Err = the query itself failed and MUST NOT be interpreted as
+    /// absence. Platforms without a query implementation keep the default.
+    async fn check_ipv4_route(&self, _name: &str, _cidr: cidr::Ipv4Cidr) -> Result<bool, Error> {
+        Err(anyhow::anyhow!("route presence check not supported on this platform").into())
+    }
+
+    async fn check_ipv6_route(&self, _name: &str, _cidr: cidr::Ipv6Cidr) -> Result<bool, Error> {
+        Err(anyhow::anyhow!("route presence check not supported on this platform").into())
+    }
+
     async fn add_ipv6_ip(
         &self,
         _name: &str,

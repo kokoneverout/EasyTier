@@ -417,6 +417,7 @@ fn setup_socket2_ext(
     bind_addr: &SocketAddr,
     #[allow(unused_variables)] bind_dev: Option<String>,
     only_v6: bool,
+    reuse_addr: bool,
 ) -> Result<(), TunnelError> {
     #[cfg(target_os = "windows")]
     {
@@ -429,14 +430,10 @@ fn setup_socket2_ext(
     }
 
     socket2_socket.set_nonblocking(true)?;
-    socket2_socket.set_reuse_address(!cfg!(target_os = "windows"))?;
-    if let Err(e) = socket2_socket.bind(&socket2::SockAddr::from(*bind_addr)) {
-        if bind_addr.is_ipv4() {
-            return Err(e.into());
-        } else {
-            tracing::warn!(?e, "bind failed, do not return error for ipv6");
-        }
-    }
+    socket2_socket.set_reuse_address(reuse_addr || !cfg!(target_os = "windows"))?;
+    // A failed IPv6 source bind must not silently become an unbound socket:
+    // that can send the peer tunnel back through the VPN's default route.
+    socket2_socket.bind(&socket2::SockAddr::from(*bind_addr))?;
 
     // #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
     // socket2_socket.set_reuse_port(true)?;
@@ -529,6 +526,7 @@ pub fn bind<B: Bindable>(
     #[builder(default, into)] dev: BindDev,
     net_ns: Option<NetNS>,
     #[builder(default)] only_v6: bool,
+    #[builder(default)] reuse_addr: bool,
 ) -> Result<B, TunnelError> {
     let _g = net_ns.map(|n| n.guard());
     let dev = match dev {
@@ -537,7 +535,7 @@ pub fn bind<B: Bindable>(
         BindDev::Custom(s) => Some(s),
     };
     let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
-    setup_socket2_ext(&socket, &addr, dev, only_v6)?;
+    setup_socket2_ext(&socket, &addr, dev, only_v6, reuse_addr)?;
     B::finalize(socket)
 }
 

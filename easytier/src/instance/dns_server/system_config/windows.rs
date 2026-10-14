@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 
 use std::io;
@@ -57,10 +58,11 @@ impl InterfaceControl {
             .collect();
 
         // IPv4 处理
-        if let Ok(key4) = RegistryManager::open_interface_key(
-            &self.interface_guid,
-            RegistryManager::IPV4_TCPIP_INTERFACE_PREFIX,
-        ) {
+        {
+            let key4 = RegistryManager::open_interface_key(
+                &self.interface_guid,
+                RegistryManager::IPV4_TCPIP_INTERFACE_PREFIX,
+            )?;
             if ipsv4.is_empty() {
                 Self::delete_value(&key4, "NameServer")?;
             } else {
@@ -78,10 +80,11 @@ impl InterfaceControl {
         }
 
         // IPv6 处理
-        if let Ok(key6) = RegistryManager::open_interface_key(
-            &self.interface_guid,
-            RegistryManager::IPV6_TCPIP_INTERFACE_PREFIX,
-        ) {
+        {
+            let key6 = RegistryManager::open_interface_key(
+                &self.interface_guid,
+                RegistryManager::IPV6_TCPIP_INTERFACE_PREFIX,
+            )?;
             if ipsv6.is_empty() {
                 Self::delete_value(&key6, "NameServer")?;
             } else {
@@ -100,15 +103,7 @@ impl InterfaceControl {
     }
 
     fn flush_dns(&self) -> io::Result<()> {
-        // 刷新 DNS 缓存
-        let output = Command::new("ipconfig")
-            .arg("/flushdns")
-            .output()
-            .expect("failed to execute process");
-        if !output.status.success() {
-            return Err(io::Error::other("Failed to flush DNS cache"));
-        }
-        Ok(())
+        flush_dns()
     }
 
     // re-register DNS
@@ -123,6 +118,17 @@ impl InterfaceControl {
         }
         Ok(())
     }
+}
+
+pub(crate) fn flush_dns() -> io::Result<()> {
+    let output = Command::new("ipconfig")
+        .arg("/flushdns")
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("Failed to flush DNS cache"));
+    }
+    Ok(())
 }
 
 pub struct WindowsDNSManager {

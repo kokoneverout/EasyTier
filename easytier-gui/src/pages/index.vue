@@ -9,13 +9,14 @@ import { exit } from '@tauri-apps/plugin-process'
 import { I18nUtils, RemoteManagement, Utils } from "easytier-frontend-lib"
 import type { MenuItem } from 'primevue/menuitem'
 import { useTray } from '~/composables/tray'
-import { initMobileVpnService } from '~/composables/mobile_vpn'
+import { initMobileVpnService, vpnServiceError } from '~/composables/mobile_vpn'
 import { GUIRemoteClient } from '~/modules/api'
 
 import { useToast, useConfirm } from 'primevue'
 import { loadMode, saveMode, WebClientConfig, type Mode } from '~/composables/mode'
 import { saveLastNetworkInstanceId, loadLastNetworkInstanceId } from '~/composables/config'
 import ModeSwitcher from '~/components/ModeSwitcher.vue'
+import AppRoutingPage from '~/components/mobile/AppRoutingPage.vue'
 import { getEasytierVersion, getServiceStatus } from '~/composables/backend'
 
 const { t, locale } = useI18n()
@@ -29,6 +30,14 @@ const manualDisconnect = ref(false)
 
 const configServerDialogVisible = ref(false)
 const configServerConnected = ref(false)
+const appRoutingVisible = ref(false)
+watch(vpnServiceError, (error) => {
+  if (error === 'no_effective_apps') {
+    appRoutingVisible.value = true
+  } else if (error && error !== 'vpn_target_changed') {
+    toast.add({ severity: 'error', summary: t('error'), detail: error, life: 10000 })
+  }
+})
 
 async function openModeDialog() {
   editingMode.value = JSON.parse(JSON.stringify(loadMode()))
@@ -361,6 +370,14 @@ const setting_menu_items: Ref<MenuItem[]> = ref([
     items: [], // Keep this to show it's a parent menu
   },
   {
+    label: () => t('app_routing.title'),
+    icon: 'pi pi-list-check',
+    command: async () => {
+      appRoutingVisible.value = true
+    },
+    visible: () => type() === 'android',
+  },
+  {
     label: () => t('about.title'),
     icon: 'pi pi-at',
     command: async () => {
@@ -469,7 +486,11 @@ const configServerConnectionStatus = computed(() => {
 
     <Menu ref="log_menu" :model="log_menu_items_popup" :popup="true" />
 
-    <RemoteManagement v-if="clientRunning" class="flex-1 overflow-y-auto" :api="remoteClient"
+    <!-- Full-screen per-app routing view. index.vue and its VPN event
+         listeners / connection polling stay mounted underneath. -->
+    <AppRoutingPage v-if="appRoutingVisible" @close="appRoutingVisible = false" />
+
+    <RemoteManagement v-if="clientRunning" v-show="!appRoutingVisible" class="flex-1 overflow-y-auto" :api="remoteClient"
       :pause-auto-refresh="isModeSaving" v-model:instance-id="instanceId" />
     <div v-else class="empty-state flex-1 flex flex-col items-center py-12">
       <i class="pi pi-server text-5xl text-secondary mb-4 opacity-50"></i>

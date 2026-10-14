@@ -13,3 +13,6 @@ pub mod virtual_nic;
 
 #[cfg(any(windows, test))]
 pub(crate) mod windows_udp_broadcast;
+
+#[cfg(any(windows, test))]
+pub(crate) mod windows_exit_dns;

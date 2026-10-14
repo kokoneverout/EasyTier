@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use super::{create_connector_by_url, http_connector::TunnelWithInfo};
 use crate::{
     common::{
-        dns::{RESOLVER, resolve_txt_record},
+        dns::RESOLVER,
         error::Error,
         global_ctx::ArcGlobalCtx,
         log,
@@ -58,7 +58,7 @@ impl DnsTunnelConnector {
         &self,
         domain_name: &str,
     ) -> Result<Box<dyn TunnelConnector>, Error> {
-        let txt_data = resolve_txt_record(domain_name)
+        let txt_data = crate::common::dns::peer_txt_record(domain_name, &self.global_ctx)
             .await
             .with_context(|| format!("resolve txt record failed, domain_name: {}", domain_name))?;
 
@@ -123,11 +123,15 @@ impl DnsTunnelConnector {
             .iter()
             .map(|(protocol, srv_domain)| {
                 let resolver = RESOLVER.clone();
+                let ctx = self.global_ctx.clone();
                 let responses = responses.clone();
                 async move {
-                    let response = resolver.srv_lookup(srv_domain).await.with_context(|| {
-                        format!("srv_lookup failed, srv_domain: {}", srv_domain)
-                    })?;
+                    let response = if crate::common::underlay::uses_bound_underlay(&ctx) {
+                        ctx.get_underlay_dns().srv_lookup(srv_domain).await
+                    } else {
+                        resolver.srv_lookup(srv_domain).await
+                    }
+                    .with_context(|| format!("srv_lookup failed, srv_domain: {}", srv_domain))?;
                     tracing::info!(?response, ?srv_domain, "srv_lookup response");
                     for record in response.iter() {
                         let parsed_record = Self::handle_one_srv_record(record, **protocol);
