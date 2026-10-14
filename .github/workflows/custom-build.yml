@@ -122,9 +122,9 @@ jobs:
             'peers::peer_manager::tests::forwarded_legacy_relay_handshake'
             'peers::tests::relay_peer_map_'
           )
-          for filter in "${filters[@]}"; do
-            cargo test --locked -p easytier --lib --target "${{ matrix.target }}" --features aes-gcm,mimalloc "$filter"
-          done
+          # One harness invocation keeps the same OR filters without rebuilding
+          # the workspace crate between cargo test invocations.
+          cargo test --locked -p easytier --lib --target "${{ matrix.target }}" --features aes-gcm,mimalloc -- "${filters[@]}"
       - name: Build core and CLI
         run: cargo build --locked --release -p easytier --bins --target "${{ matrix.target }}" --features aes-gcm,mimalloc
       - name: Package binaries
