@@ -25,7 +25,8 @@ permissions:
 
 concurrency:
   group: custom-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Complete active builds so a newer revision can reuse their caches.
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
