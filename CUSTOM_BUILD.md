@@ -1,6 +1,6 @@
 # Custom EasyTier builds
 
-This branch contains the existing dual-stack exit, Windows DNS and physical-interface binding fixes, and Android application routing changes. Its upstream base is `8428a89d2dabc94c97d370ec607c6ca142473626` (version 2.6.4). It does not yet incorporate the 2.7.0 merge review.
+This branch contains the existing dual-stack exit, Windows DNS and physical-interface binding fixes, and Android application routing changes. Its upstream base is `8428a89d2dabc94c97d370ec607c6ca142473626` (version 2.6.4). Selected v2.7.0 transport, peer recovery and platform fixes are included; see [UPSTREAM_BACKPORTS.md](UPSTREAM_BACKPORTS.md) for scope and compatibility.
 
 The upstream `main` branch is retained. Use `codex/dual-stack-exit` for these custom builds.
 
@@ -16,7 +16,7 @@ Push code to `codex/dual-stack-exit`, or open **Actions → Custom Windows Linux
 
 Each artifact includes the source commit and SHA-256 checksums. Artifacts are kept for 7 days; download builds you want to keep. Building does not install programs or change any device configuration. These jobs do not publish GitHub Releases.
 
-Frontend VPN/routing tests and a GUI build run first. Windows and Linux also run the QUIC tunnel tests before compiling their release binaries. Only the architectures above are built automatically.
+Frontend VPN/routing tests and a GUI build run first. Windows and Linux also run QUIC tunnel/proxy, peer recovery, relay routing and topology regressions before compiling their release binaries. Only the architectures above are built automatically.
 
 The QUIC domain test uses a loopback-only hostname fixture on the disposable CI runners. Both IPv4 and IPv6 mappings are checked before compiling, so the test does not depend on public DNS.
 

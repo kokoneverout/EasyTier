@@ -1040,8 +1040,8 @@ mod tests {
         common::tests::{_tunnel_bench, _tunnel_pingpong},
     };
     use std::sync::LazyLock;
-    use tokio::time::timeout;
     use tokio::runtime::{Builder, Runtime};
+    use tokio::time::timeout;
 
     use super::*;
 

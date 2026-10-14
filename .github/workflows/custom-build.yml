@@ -108,8 +108,23 @@ jobs:
         run: |
           echo "LIB=${GITHUB_WORKSPACE//\//\\}\\easytier\\third_party\\x86_64;$LIB" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/easytier/third_party/x86_64" >> "$GITHUB_PATH"
-      - name: Test QUIC tunnels
-        run: cargo test --locked -p easytier --lib --target "${{ matrix.target }}" --features aes-gcm,mimalloc tunnel::quic::tests
+      - name: Test transport and peer recovery backports
+        run: |
+          filters=(
+            'tunnel::quic::'
+            'gateway::quic_proxy::tests'
+            'utils::expiring_set::tests'
+            'peer_center::server::tests'
+            'peers::peer_conn_ping::tests'
+            'peers::peer_manager::tests::send_msg_internal_'
+            'peers::peer_manager::tests::full_host_packet_queue'
+            'peers::peer_manager::tests::latency_first_relay_handshake'
+            'peers::peer_manager::tests::forwarded_legacy_relay_handshake'
+            'peers::tests::relay_peer_map_'
+          )
+          for filter in "${filters[@]}"; do
+            cargo test --locked -p easytier --lib --target "${{ matrix.target }}" --features aes-gcm,mimalloc "$filter"
+          done
       - name: Build core and CLI
         run: cargo build --locked --release -p easytier --bins --target "${{ matrix.target }}" --features aes-gcm,mimalloc
       - name: Package binaries
