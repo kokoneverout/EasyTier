@@ -77,9 +77,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: custom-core-${{ matrix.target }}
+          cache-on-failure: true
       - name: Locate Windows native libraries
         if: runner.os == 'Windows'
-        run: echo "LIB=${GITHUB_WORKSPACE//\//\\}\\easytier\\third_party\\x86_64;$LIB" >> "$GITHUB_ENV"
+        run: |
+          echo "LIB=${GITHUB_WORKSPACE//\//\\}\\easytier\\third_party\\x86_64;$LIB" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/easytier/third_party/x86_64" >> "$GITHUB_PATH"
       - name: Test QUIC tunnels
         run: cargo test --locked -p easytier --lib --target "${{ matrix.target }}" --features aes-gcm,mimalloc tunnel::quic::tests
       - name: Build core and CLI
@@ -146,6 +149,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: custom-android-aarch64
+          cache-on-failure: true
       - uses: ./.github/actions/prepare-custom-frontend
       - uses: gradle/actions/setup-gradle@v4
       - name: Build signed APK
