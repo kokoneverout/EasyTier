@@ -1,5 +1,7 @@
 # EasyTier
 
+> Custom branch: dual-stack exit, Android app routing, and Windows DNS/physical-interface fixes. Download Windows, Linux, and Android builds from [Custom Actions](https://github.com/kokoneverout/EasyTier/actions/workflows/custom-build.yml). See [build instructions](CUSTOM_BUILD.md). This branch remains based on 2.6.4.
+
 [![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
 [![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
 [![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)

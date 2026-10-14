@@ -1,5 +1,7 @@
 # EasyTier
 
+> 定制分支：包含双栈出口、Android 应用分流、Windows DNS 与物理网卡绑定修正。Windows、Linux、Android 构建产物请到[本仓库 Actions](https://github.com/kokoneverout/EasyTier/actions/workflows/custom-build.yml)下载，操作见[构建说明](CUSTOM_BUILD.md)。当前仍基于 2.6.4。
+
 [![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
 [![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
 [![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
