@@ -1,4 +1,5 @@
 pub mod error;
+pub mod expiring_set;
 pub mod panic;
 pub mod string;
 pub mod task;
