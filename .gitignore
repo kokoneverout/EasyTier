@@ -43,3 +43,12 @@ easytier-gui/src-tauri/*.sys
 
 .direnv
 .flake-profile
+
+# Local operations and Android signing material
+/.tools/
+/.codex-remote-attachments/
+/docs/dual-stack-exit/
+/email_cache.sqlite
+/easytier.log
+/easytier-gui/src-tauri/gen/android/keystore.properties
+/easytier-gui/src-tauri/gen/android/app/upload-keystore.jks

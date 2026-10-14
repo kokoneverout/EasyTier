@@ -1,0 +1,179 @@
+name: Custom Windows Linux Android
+
+on:
+  push:
+    branches: ['codex/dual-stack-exit']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'easytier/**'
+      - 'easytier-rpc-build/**'
+      - 'easytier-gui/**'
+      - 'easytier-web/frontend-lib/**'
+      - 'tauri-plugin-vpnservice/**'
+      - '.github/actions/**'
+      - '.github/workflows/custom-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  frontend-check:
+    name: Frontend tests and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/prepare-custom-frontend
+      - name: Test VPN and routing logic
+        run: pnpm --filter easytier-gui exec vitest run
+      - name: Check and build GUI
+        run: pnpm --filter easytier-gui build
+
+  core:
+    name: Core ${{ matrix.name }}
+    needs: frontend-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            suffix: '.exe'
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            suffix: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Prepare Rust and protoc
+        uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ matrix.target }}
+          gui: 'false'
+          pnpm: 'false'
+          token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: custom-core-${{ matrix.target }}
+      - name: Locate Windows native libraries
+        if: runner.os == 'Windows'
+        run: echo "LIB=${GITHUB_WORKSPACE//\//\\}\\easytier\\third_party\\x86_64;$LIB" >> "$GITHUB_ENV"
+      - name: Test QUIC tunnels
+        run: cargo test --locked -p easytier --lib --target "${{ matrix.target }}" --features aes-gcm,mimalloc tunnel::quic::tests
+      - name: Build core and CLI
+        run: cargo build --locked --release -p easytier --bins --target "${{ matrix.target }}" --features aes-gcm,mimalloc
+      - name: Package binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          mkdir -p artifacts
+          cp "target/$TARGET/release/easytier-core$SUFFIX" artifacts/
+          cp "target/$TARGET/release/easytier-cli$SUFFIX" artifacts/
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            find easytier/third_party/x86_64 -maxdepth 1 -type f \( -name '*.dll' -o -name '*.sys' \) -exec cp {} artifacts/ \;
+          fi
+          printf 'Commit: %s\nTarget: %s\nRun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$TARGET" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
+          (cd artifacts && sha256sum easytier-* > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v5
+        with:
+          name: easytier-custom-${{ matrix.name }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Android arm64 APK
+    needs: frontend-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Restore Android signing files
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$KEYSTORE_PROPERTIES" ]]; then
+            echo '::error::Configure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PROPERTIES repository secrets.'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > easytier-gui/src-tauri/gen/android/app/upload-keystore.jks
+          printf '%s' "$KEYSTORE_PROPERTIES" > easytier-gui/src-tauri/gen/android/keystore.properties
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '12.0'
+          packages: 'build-tools;34.0.0 ndk;26.0.10792818 platform-tools platforms;android-34'
+      - name: Configure Android toolchain
+        run: |
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.0.10792818" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/ndk/26.0.10792818/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Prepare Rust and protoc
+        uses: ./.github/actions/prepare-build
+        with:
+          target: aarch64-linux-android
+          gui: 'false'
+          pnpm: 'false'
+          token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: custom-android-aarch64
+      - uses: ./.github/actions/prepare-custom-frontend
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build signed APK
+        working-directory: easytier-gui
+        run: pnpm tauri android build --apk --target aarch64 --split-per-abi --features easytier/aes-gcm
+      - name: Verify signature and package APK
+        run: |
+          mkdir -p artifacts
+          find easytier-gui/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' -exec cp {} artifacts/ \;
+          shopt -s nullglob
+          apks=(artifacts/*.apk)
+          if (( ${#apks[@]} != 1 )); then
+            echo '::error::Expected exactly one arm64 release APK.'
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "${apks[0]}"
+          mv "${apks[0]}" artifacts/easytier-custom-android-arm64.apk
+          printf 'Commit: %s\nTarget: aarch64-linux-android\nRun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
+          (cd artifacts && sha256sum *.apk > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v5
+        with:
+          name: easytier-custom-android-arm64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove signing files
+        if: always()
+        run: |
+          rm -f easytier-gui/src-tauri/gen/android/app/upload-keystore.jks
+          rm -f easytier-gui/src-tauri/gen/android/keystore.properties
