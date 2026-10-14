@@ -196,6 +196,39 @@ impl Debug for PeerManager {
     }
 }
 
+// for tun/tap ip/eth packet.
+struct NicPacketProcessor {
+    nic_channel: PacketRecvChan,
+}
+#[async_trait::async_trait]
+impl PeerPacketFilter for NicPacketProcessor {
+    async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
+        let hdr = packet.peer_manager_header().unwrap();
+        if hdr.packet_type == PacketType::Data as u8 && !hdr.is_not_send_to_tun() {
+            if hdr.is_encrypted() || hdr.is_compressed() {
+                tracing::warn!(
+                    from_peer_id = hdr.from_peer_id.get(),
+                    to_peer_id = hdr.to_peer_id.get(),
+                    encrypted = hdr.is_encrypted(),
+                    compressed = hdr.is_compressed(),
+                    "dropping packet before nic because it is not fully decoded"
+                );
+                return None;
+            }
+            tracing::trace!(?packet, "send packet to nic channel");
+            if let Err(error) = self.nic_channel.try_send(packet) {
+                tracing::trace!(
+                    ?error,
+                    "dropping packet because nic channel cannot accept it"
+                );
+            }
+            None
+        } else {
+            Some(packet)
+        }
+    }
+}
+
 impl PeerManager {
     // Keep lazy-p2p demand alive across the 5s task rescan interval and a full on-demand
     // connect attempt, without retaining extra per-task state in the hot path.
@@ -1181,34 +1214,6 @@ impl PeerManager {
     }
 
     async fn init_packet_process_pipeline(&self) {
-        // for tun/tap ip/eth packet.
-        struct NicPacketProcessor {
-            nic_channel: PacketRecvChan,
-        }
-        #[async_trait::async_trait]
-        impl PeerPacketFilter for NicPacketProcessor {
-            async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
-                let hdr = packet.peer_manager_header().unwrap();
-                if hdr.packet_type == PacketType::Data as u8 && !hdr.is_not_send_to_tun() {
-                    if hdr.is_encrypted() || hdr.is_compressed() {
-                        tracing::warn!(
-                            from_peer_id = hdr.from_peer_id.get(),
-                            to_peer_id = hdr.to_peer_id.get(),
-                            encrypted = hdr.is_encrypted(),
-                            compressed = hdr.is_compressed(),
-                            "dropping packet before nic because it is not fully decoded"
-                        );
-                        return None;
-                    }
-                    tracing::trace!(?packet, "send packet to nic channel");
-                    // TODO: use a function to get the body ref directly for zero copy
-                    let _ = self.nic_channel.send(packet).await;
-                    None
-                } else {
-                    Some(packet)
-                }
-            }
-        }
         self.add_packet_process_pipeline(Box::new(NicPacketProcessor {
             nic_channel: self.nic_channel.clone(),
         }))
@@ -1506,9 +1511,22 @@ impl PeerManager {
     ) -> Result<(), Error> {
         let policy =
             Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first());
+        let is_latency_first = msg.peer_manager_header().unwrap().is_latency_first();
         let packet_type = msg.peer_manager_header().unwrap().packet_type;
         let msg_len = msg.buf_len() as u64;
-        let send_result = if peers.has_peer(dst_peer_id) {
+        let latency_first_gateway = if is_latency_first {
+            peers
+                .get_gateway_peer_id(dst_peer_id, policy.clone())
+                .await
+                .filter(|gateway| *gateway != dst_peer_id)
+        } else {
+            None
+        };
+        let send_result = if let Some(gateway) = latency_first_gateway
+            && (peers.has_peer(gateway) || foreign_network_client.has_next_hop(gateway))
+        {
+            relay_peer_map.send_msg(msg, dst_peer_id, policy).await
+        } else if peers.has_peer(dst_peer_id) {
             peers.send_msg_directly(msg, dst_peer_id).await
         } else if foreign_network_client.has_next_hop(dst_peer_id) {
             foreign_network_client.send_msg(msg, dst_peer_id).await
@@ -2135,6 +2153,8 @@ impl PeerManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::{common::PeerId, peers::route_trait::RouteCostCalculatorInterface};
+    use std::collections::HashMap;
     use std::{
         fmt::Debug,
         sync::Arc,
@@ -2176,7 +2196,8 @@ mod tests {
         },
     };
 
-    use super::PeerManager;
+    use super::{NicPacketProcessor, PeerManager};
+    use crate::peers::PeerPacketFilter;
 
     async fn create_lazy_peer_manager() -> Arc<PeerManager> {
         let peer_mgr = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
@@ -2199,6 +2220,254 @@ mod tests {
         LabelSet::new().with_label_type(LabelType::NetworkName(
             peer_mgr.get_global_ctx().get_network_name(),
         ))
+    }
+
+    struct TestCostCalculator {
+        costs: HashMap<(PeerId, PeerId), i32>,
+    }
+
+    impl RouteCostCalculatorInterface for TestCostCalculator {
+        fn calculate_cost(&self, src: PeerId, dst: PeerId) -> i32 {
+            *self.costs.get(&(src, dst)).unwrap_or(&1)
+        }
+    }
+
+    #[tokio::test]
+    async fn send_msg_internal_uses_latency_first_gateway_for_direct_peer() {
+        let peer_mgr_a = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let peer_mgr_b = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+        let peer_mgr_c = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
+
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
+        connect_peer_manager(peer_mgr_b.clone(), peer_mgr_c.clone()).await;
+        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_c.clone()).await;
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
+            .await
+            .unwrap();
+        wait_route_appear(peer_mgr_b.clone(), peer_mgr_c.clone())
+            .await
+            .unwrap();
+        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
+            .await
+            .unwrap();
+
+        peer_mgr_a
+            .get_route()
+            .set_route_cost_fn(Box::new(TestCostCalculator {
+                costs: HashMap::from([
+                    ((peer_mgr_a.my_peer_id(), peer_mgr_c.my_peer_id()), 100),
+                    ((peer_mgr_a.my_peer_id(), peer_mgr_b.my_peer_id()), 1),
+                    ((peer_mgr_b.my_peer_id(), peer_mgr_c.my_peer_id()), 1),
+                ]),
+            }))
+            .await;
+
+        wait_for_condition(
+            || {
+                let peer_mgr_a = peer_mgr_a.clone();
+                let peer_mgr_b = peer_mgr_b.clone();
+                let peer_mgr_c = peer_mgr_c.clone();
+                async move {
+                    peer_mgr_a
+                        .get_route()
+                        .get_next_hop_with_policy(peer_mgr_c.my_peer_id(), NextHopPolicy::LeastCost)
+                        .await
+                        == Some(peer_mgr_b.my_peer_id())
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let b_network_labels = network_labels(&peer_mgr_b);
+        let forwarded_bytes_before = metric_value(
+            &peer_mgr_b,
+            MetricName::TrafficBytesForwarded,
+            &b_network_labels,
+        );
+        let forwarded_packets_before = metric_value(
+            &peer_mgr_b,
+            MetricName::TrafficPacketsForwarded,
+            &b_network_labels,
+        );
+
+        let mut pkt = ZCPacket::new_with_payload(b"latency-first");
+        pkt.fill_peer_manager_hdr(
+            peer_mgr_a.my_peer_id(),
+            peer_mgr_c.my_peer_id(),
+            PacketType::Data as u8,
+        );
+        pkt.mut_peer_manager_header()
+            .unwrap()
+            .set_latency_first(true);
+        let pkt_len = pkt.buf_len() as u64;
+
+        PeerManager::send_msg_internal(
+            &peer_mgr_a.peers,
+            &peer_mgr_a.foreign_network_client,
+            &peer_mgr_a.relay_peer_map,
+            Some(&peer_mgr_a.traffic_metrics),
+            pkt,
+            peer_mgr_c.my_peer_id(),
+        )
+        .await
+        .unwrap();
+
+        wait_for_condition(
+            || {
+                let peer_mgr_b = peer_mgr_b.clone();
+                let b_network_labels = b_network_labels.clone();
+                async move {
+                    metric_value(
+                        &peer_mgr_b,
+                        MetricName::TrafficBytesForwarded,
+                        &b_network_labels,
+                    ) >= forwarded_bytes_before + pkt_len
+                        && metric_value(
+                            &peer_mgr_b,
+                            MetricName::TrafficPacketsForwarded,
+                            &b_network_labels,
+                        ) > forwarded_packets_before
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+
+    // Simulate the stale direct path accepting traffic but losing relay ACKs.
+    // Optionally remove the new request flag to cover forwarded legacy peers.
+    struct RelayHandshakeFilter {
+        drop_ack: bool,
+        strip_policy: bool,
+    }
+
+    impl crate::tunnel::filter::TunnelFilter for RelayHandshakeFilter {
+        type FilterOutput = ();
+        fn before_send(&self, mut packet: ZCPacket) -> Option<ZCPacket> {
+            let hdr = packet.mut_peer_manager_header().unwrap();
+            if self.drop_ack && hdr.packet_type == PacketType::RelayHandshakeAck as u8 {
+                return None;
+            }
+            if self.strip_policy && hdr.packet_type == PacketType::RelayHandshake as u8 {
+                hdr.set_latency_first(false);
+            }
+            Some(packet)
+        }
+        fn filter_output(&self) {}
+    }
+
+    async fn assert_latency_first_relay_handshake(strip_policy: bool) {
+        use crate::peers::{peer_session::SessionKey, tests::create_mock_peer_manager_secure};
+        let a = create_mock_peer_manager_secure("relay-test".into(), "test-secret".into()).await;
+        let b = create_mock_peer_manager_secure("relay-test".into(), "test-secret".into()).await;
+        let c = create_mock_peer_manager_secure("relay-test".into(), "test-secret".into()).await;
+        let (a_b, b_a) = create_ring_tunnel_pair();
+        let a_b = Box::new(TunnelWithFilter::new(
+            a_b,
+            RelayHandshakeFilter {
+                drop_ack: false,
+                strip_policy,
+            },
+        ));
+        let (ra, rb) = tokio::join!(
+            a.add_client_tunnel(a_b, false),
+            b.add_tunnel_as_server(b_a, true)
+        );
+        ra.unwrap();
+        rb.unwrap();
+        connect_peer_manager(b.clone(), c.clone()).await;
+        let (a_c, c_a) = create_ring_tunnel_pair();
+        let c_a = Box::new(TunnelWithFilter::new(
+            c_a,
+            RelayHandshakeFilter {
+                drop_ack: true,
+                strip_policy: false,
+            },
+        ));
+        let (ra, rc) = tokio::join!(
+            a.add_client_tunnel(a_c, false),
+            c.add_tunnel_as_server(c_a, true)
+        );
+        ra.unwrap();
+        rc.unwrap();
+        wait_route_appear(a.clone(), c.clone()).await.unwrap();
+        wait_route_appear(c.clone(), a.clone()).await.unwrap();
+        for (src, dst) in [(&a, &c), (&c, &a)] {
+            src.get_route()
+                .set_route_cost_fn(Box::new(TestCostCalculator {
+                    costs: HashMap::from([
+                        ((src.my_peer_id(), dst.my_peer_id()), 100),
+                        ((src.my_peer_id(), b.my_peer_id()), 1),
+                        ((b.my_peer_id(), dst.my_peer_id()), 1),
+                    ]),
+                }))
+                .await;
+        }
+        wait_for_condition(
+            || {
+                let a = a.clone();
+                let b = b.clone();
+                let c = c.clone();
+                async move {
+                    a.peers
+                        .get_gateway_peer_id(c.my_peer_id(), NextHopPolicy::LeastCost)
+                        .await
+                        == Some(b.my_peer_id())
+                        && c.peers
+                            .get_gateway_peer_id(a.my_peer_id(), NextHopPolicy::LeastCost)
+                            .await
+                            == Some(b.my_peer_id())
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        // Direct handshakes already populated these stores. Force a fresh relay exchange.
+        a.peer_session_store
+            .remove(&SessionKey::new("relay-test".into(), c.my_peer_id()));
+        c.peer_session_store
+            .remove(&SessionKey::new("relay-test".into(), a.my_peer_id()));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            a.relay_peer_map
+                .handshake_session(c.my_peer_id(), NextHopPolicy::LeastCost, None),
+        )
+        .await
+        .expect("relay ACK used the blackholed direct path")
+        .unwrap();
+        assert!(a.relay_peer_map.has_session(c.my_peer_id()));
+        assert!(c.relay_peer_map.has_session(a.my_peer_id()));
+    }
+
+    #[tokio::test]
+    async fn latency_first_relay_handshake_avoids_stale_direct_ack() {
+        assert_latency_first_relay_handshake(false).await;
+    }
+
+    #[tokio::test]
+    async fn forwarded_legacy_relay_handshake_avoids_stale_direct_ack() {
+        assert_latency_first_relay_handshake(true).await;
+    }
+
+    #[tokio::test]
+    async fn full_host_packet_queue_does_not_block_peer_packet_processing() {
+        let (nic_channel, mut nic_receiver) = tokio::sync::mpsc::channel(1);
+        nic_channel
+            .send(ZCPacket::new_with_payload(b"queued"))
+            .await
+            .unwrap();
+        let processor = NicPacketProcessor { nic_channel };
+        let mut packet = ZCPacket::new_with_payload(b"next");
+        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            processor.try_process_packet_from_peer(packet),
+        )
+        .await;
+        assert!(result.is_ok(), "a full host queue blocked the peer router");
+        assert!(result.unwrap().is_none());
+        assert_eq!(nic_receiver.try_recv().unwrap().payload(), b"queued");
     }
 
     #[test]
