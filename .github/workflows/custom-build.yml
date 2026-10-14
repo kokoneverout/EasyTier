@@ -68,6 +68,30 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
+      - name: Configure loopback DNS fixture (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $taskHosts = Join-Path $env:WINDIR 'System32/drivers/etc/hosts'
+          Add-Content -LiteralPath $taskHosts -Value @'
+
+          127.0.0.1 test.easytier.top
+          ::1 test.easytier.top
+          '@
+          Clear-DnsClientCache
+          $taskAddresses = [System.Net.Dns]::GetHostAddresses('test.easytier.top').IPAddressToString
+          if ('127.0.0.1' -notin $taskAddresses -or '::1' -notin $taskAddresses) {
+            throw "Loopback DNS fixture must resolve both IP families: $taskAddresses"
+          }
+      - name: Configure loopback DNS fixture (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          printf '\n127.0.0.1 test.easytier.top\n::1 test.easytier.top\n' | sudo tee -a /etc/hosts > /dev/null
+          python3 - <<'PY'
+          import socket
+          addresses = {address[4][0] for address in socket.getaddrinfo('test.easytier.top', 31016, type=socket.SOCK_STREAM)}
+          assert {'127.0.0.1', '::1'} <= addresses, addresses
+          PY
       - name: Prepare Rust and protoc
         uses: ./.github/actions/prepare-build
         with:

@@ -18,6 +18,8 @@ Each artifact includes the source commit and SHA-256 checksums. Artifacts are ke
 
 Frontend VPN/routing tests and a GUI build run first. Windows and Linux also run the QUIC tunnel tests before compiling their release binaries. Only the architectures above are built automatically.
 
+The QUIC domain test uses a loopback-only hostname fixture on the disposable CI runners. Both IPv4 and IPv6 mappings are checked before compiling, so the test does not depend on public DNS.
+
 ## Android signing
 
 Repository **Settings → Secrets and variables → Actions** must contain:
