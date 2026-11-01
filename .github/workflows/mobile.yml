@@ -145,7 +145,12 @@ jobs:
         if: needs.pre_job.outputs.full_build == 'true'
         run: |
           cd easytier-gui
-          pnpm tauri android build --apk --target "$ARCH" --split-per-abi
+          pnpm tauri android build --apk --target "$ARCH" --split-per-abi --features easytier/aes-gcm
+
+      - name: Test Android app routing policy
+        if: needs.pre_job.outputs.full_build == 'true' && matrix.ARCH == 'aarch64'
+        working-directory: easytier-gui/src-tauri/gen/android
+        run: ./gradlew :tauri-plugin-vpnservice:testDebugUnitTest --no-daemon
 
       - name: Collect artifact
         if: needs.pre_job.outputs.full_build == 'true'
