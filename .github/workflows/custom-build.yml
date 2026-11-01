@@ -4,7 +4,7 @@ on:
   push:
     branches: [codex/upstream-alignment]
     paths:
-      - '.github/workflows/alignment-core.yml'
+      - '.github/workflows/custom-build.yml'
       - 'Cargo.*'
       - 'rust-toolchain.toml'
       - 'easytier/**'
@@ -16,8 +16,8 @@ on:
       platform:
         description: Candidate platform
         type: choice
-        options: [linux-x86_64, windows-x86_64]
-        default: linux-x86_64
+        options: [all, linux-x86_64, windows-x86_64]
+        default: all
 
 permissions:
   contents: read
@@ -36,10 +36,14 @@ defaults:
 
 jobs:
   candidate:
-    runs-on: ${{ inputs.platform == 'windows-x86_64' && 'windows-2022' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.platform == 'windows-x86_64' && '["windows-x86_64"]' || inputs.platform == 'linux-x86_64' && '["linux-x86_64"]' || '["linux-x86_64", "windows-x86_64"]') }}
+    runs-on: ${{ matrix.platform == 'windows-x86_64' && 'windows-2022' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     env:
-      TARGET: ${{ inputs.platform == 'windows-x86_64' && 'x86_64-pc-windows-msvc' || 'x86_64-unknown-linux-musl' }}
+      TARGET: ${{ matrix.platform == 'windows-x86_64' && 'x86_64-pc-windows-msvc' || 'x86_64-unknown-linux-musl' }}
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/prepare-build
@@ -78,7 +82,7 @@ jobs:
           (cd artifacts && sha256sum easytier-* > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v5
         with:
-          name: alignment-${{ inputs.platform || 'linux-x86_64' }}
+          name: alignment-${{ matrix.platform }}
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
