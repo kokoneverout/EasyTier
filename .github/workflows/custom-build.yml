@@ -1,7 +1,7 @@
-name: Custom Windows Linux Android
+name: Custom Windows Linux Android Web
 on:
   push:
-    branches: [codex/upstream-alignment]
+    branches: [codex/upstream-alignment, codex/web-management]
     paths:
       - '.github/**'
       - '.cargo/**'
@@ -15,7 +15,7 @@ on:
       - 'easytier-proto/**'
       - 'easytier-rpc-build/**'
       - 'easytier-gui/**'
-      - 'easytier-web/frontend-lib/**'
+      - 'easytier-web/**'
       - 'tauri-plugin-vpnservice/**'
       - 'scripts/upstream-alignment/**'
   workflow_dispatch:
@@ -23,7 +23,7 @@ on:
       platform:
         description: Platform to build
         type: choice
-        options: [all, linux-x86_64, windows-x86_64, android-arm64]
+        options: [all, linux-x86_64, windows-x86_64, android-arm64, web-linux-x86_64]
         default: all
 permissions:
   contents: read
@@ -42,7 +42,7 @@ defaults:
     shell: bash
 jobs:
   frontend:
-    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android-arm64'
+    if: github.ref != 'refs/heads/codex/web-management' && (github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android-arm64')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -63,7 +63,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   core:
-    if: inputs.platform != 'android-arm64'
+    if: github.ref != 'refs/heads/codex/web-management' && inputs.platform != 'android-arm64' && inputs.platform != 'web-linux-x86_64'
     strategy:
       fail-fast: false
       matrix:
@@ -134,8 +134,52 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+  web:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'web-linux-x86_64'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/prepare-frontend
+        with:
+          token: ${{ github.token }}
+      - name: Build management frontend
+        run: pnpm --filter easytier-frontend build
+      - name: Browser regression
+        run: |
+          pnpm --filter easytier-frontend exec playwright install --with-deps chromium
+          cd easytier-web/frontend
+          node --test tests/dashboard.test.mjs
+      - uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: custom-core-${{ env.TARGET }}
+          cache-on-failure: true
+      - name: Management server regression
+        run: cargo test --locked -p easytier-web --features embed --bin easytier-web
+      - name: Build embedded management server
+        run: cargo build --release --locked -p easytier-web --features embed --target "$TARGET"
+      - name: Package
+        run: |
+          mkdir -p artifacts
+          cp "target/$TARGET/release/easytier-web" artifacts/
+          tar -C easytier-web/frontend/dist -czf artifacts/easytier-web-frontend.tar.gz .
+          printf 'Commit: %s\nTarget: %s\nFeatures: embed\nRun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$TARGET" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
+          (cd artifacts && sha256sum easytier-web easytier-web-frontend.tar.gz BUILD.txt > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v5
+        with:
+          name: easytier-web-linux-x86_64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
   android:
-    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android-arm64'
+    if: github.ref != 'refs/heads/codex/web-management' && (github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android-arm64')
     needs: frontend
     runs-on: ubuntu-24.04
     timeout-minutes: 90
