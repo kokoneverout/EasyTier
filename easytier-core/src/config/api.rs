@@ -38,6 +38,13 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
         result.network_length = Some(ipv4.network_length() as i32);
     }
 
+    result.virtual_ipv6 = config.get_ipv6().map(|addr| format!("{addr:#}"));
+    result.vpn_dns = config.get_vpn_dns().map(|dns| dns.to_string());
+    if let Some(routes) = config.get_routes_v6() {
+        result.enable_manual_routes_v6 = Some(true);
+        result.routes_v6 = routes.iter().map(ToString::to_string).collect();
+    }
+
     if config.get_ipv6_public_addr_provider() != default_config.get_ipv6_public_addr_provider() {
         result.ipv6_public_addr_provider = Some(config.get_ipv6_public_addr_provider());
     }

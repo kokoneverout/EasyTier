@@ -17,6 +17,9 @@ pub mod peers;
 pub mod runtime;
 pub mod toml;
 
+#[cfg(all(test, feature = "web-client"))]
+mod dualstack_tests;
+
 pub use dhcp::DhcpConfig;
 pub(crate) use dhcp::valid_ipv6_subnet;
 pub use encryption::EncryptionAlgorithm;

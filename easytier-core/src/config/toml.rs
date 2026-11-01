@@ -115,6 +115,12 @@ pub trait ConfigLoader: Send + Sync {
     fn get_routes(&self) -> Option<Vec<cidr::Ipv4Cidr>>;
     fn set_routes(&self, routes: Option<Vec<cidr::Ipv4Cidr>>);
 
+    fn get_routes_v6(&self) -> Option<Vec<cidr::Ipv6Cidr>>;
+    fn set_routes_v6(&self, routes: Option<Vec<cidr::Ipv6Cidr>>);
+
+    fn get_vpn_dns(&self) -> Option<IpAddr>;
+    fn set_vpn_dns(&self, dns: Option<IpAddr>);
+
     fn get_socks5_portal(&self) -> Option<url::Url>;
     fn set_socks5_portal(&self, addr: Option<url::Url>);
 
@@ -413,6 +419,7 @@ struct Config {
     instance_id: Option<uuid::Uuid>,
     ipv4: Option<String>,
     ipv6: Option<String>,
+    vpn_dns: Option<IpAddr>,
     ipv6_public_addr_provider: Option<bool>,
     ipv6_public_addr_auto: Option<bool>,
     ipv6_public_addr_prefix: Option<String>,
@@ -429,6 +436,7 @@ struct Config {
     vpn_portal_config: Option<VpnPortalConfig>,
 
     routes: Option<Vec<cidr::Ipv4Cidr>>,
+    routes_v6: Option<Vec<cidr::Ipv6Cidr>>,
 
     socks5_proxy: Option<url::Url>,
 
@@ -939,6 +947,22 @@ impl ConfigLoader for TomlConfig {
 
     fn set_routes(&self, routes: Option<Vec<cidr::Ipv4Cidr>>) {
         self.config.lock().unwrap().routes = routes;
+    }
+
+    fn get_routes_v6(&self) -> Option<Vec<cidr::Ipv6Cidr>> {
+        self.config.lock().unwrap().routes_v6.clone()
+    }
+
+    fn set_routes_v6(&self, routes: Option<Vec<cidr::Ipv6Cidr>>) {
+        self.config.lock().unwrap().routes_v6 = routes;
+    }
+
+    fn get_vpn_dns(&self) -> Option<IpAddr> {
+        self.config.lock().unwrap().vpn_dns
+    }
+
+    fn set_vpn_dns(&self, dns: Option<IpAddr>) {
+        self.config.lock().unwrap().vpn_dns = dns;
     }
 
     fn get_socks5_portal(&self) -> Option<url::Url> {

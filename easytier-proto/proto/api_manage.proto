@@ -111,6 +111,13 @@ message NetworkConfig {
   optional string dhcp_ipv4_cidr = 74;
   optional bool dhcpv6 = 75;
   optional string dhcp_ipv6_cidr = 76;
+  repeated string routes_v6 = 77;
+  // Static IPv6 address including its network prefix.
+  optional string virtual_ipv6 = 78;
+  // Explicit VPN DNS server. Native adapters own installation and cleanup.
+  optional string vpn_dns = 79;
+  // Absence retains legacy behavior: a nonempty routes_v6 list enables it.
+  optional bool enable_manual_routes_v6 = 80;
 }
 
 message ManagedCredentialConfig {

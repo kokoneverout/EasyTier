@@ -165,6 +165,12 @@ core_clap:
   manual_routes:
     en: "assign routes cidr manually, will disable subnet proxy and wireguard routes propagated from peers. e.g.: 192.168.0.0/16"
     zh-CN: "手动分配路由CIDR，将禁用子网代理和从对等节点传播的wireguard路由。例如：192.168.0.0/16"
+  manual_routes_v6:
+    en: "assign IPv6 route CIDRs manually, independently of IPv4 routes"
+    zh-CN: "手动指定 IPv6 路由 CIDR，与 IPv4 路由独立"
+  vpn_dns:
+    en: "DNS server for the VPN interface (IPv4 or IPv6)"
+    zh-CN: "VPN 网卡使用的 DNS 服务器（IPv4 或 IPv6）"
   relay_network_whitelist:
     en: |+
         only forward traffic from the whitelist networks, supporting wildcard strings, multiple network names can be separated by spaces.

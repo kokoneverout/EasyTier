@@ -196,6 +196,9 @@ struct NetworkOptions {
     )]
     ipv6: Option<String>,
 
+    #[arg(long, env = "ET_VPN_DNS", help = t!("core_clap.vpn_dns").to_string())]
+    vpn_dns: Option<IpAddr>,
+
     #[arg(
         long,
         env = "ET_IPV6_PUBLIC_ADDR_PROVIDER",
@@ -356,6 +359,15 @@ struct NetworkOptions {
         num_args = 0..
     )]
     manual_routes: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        env = "ET_MANUAL_ROUTES_V6",
+        value_delimiter = ',',
+        help = t!("core_clap.manual_routes_v6").to_string(),
+        num_args = 0..
+    )]
+    manual_routes_v6: Option<Vec<cidr::Ipv6Cidr>>,
 
     #[cfg(feature = "socks5")]
     #[arg(
@@ -746,6 +758,10 @@ impl NetworkOptions {
             })?))
         }
 
+        if let Some(dns) = self.vpn_dns {
+            cfg.set_vpn_dns(Some(dns));
+        }
+
         if let Some(enabled) = self.ipv6_public_addr_provider {
             cfg.set_ipv6_public_addr_provider(enabled);
         }
@@ -867,6 +883,10 @@ impl NetworkOptions {
                 );
             }
             cfg.set_routes(Some(routes));
+        }
+
+        if let Some(routes) = &self.manual_routes_v6 {
+            cfg.set_routes_v6(Some(routes.clone()));
         }
 
         #[cfg(feature = "socks5")]
@@ -1566,6 +1586,37 @@ async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_dualstack_cli_preserves_config_and_validates_overrides() {
+        use super::*;
+        let config = TomlConfigLoader::new_from_str("routes = []").unwrap();
+        let cli = Cli::try_parse_from([
+            "easytier-core",
+            "--manual-routes-v6",
+            "::/1,8000::/1",
+            "--vpn-dns",
+            "fd79::1",
+        ])
+        .unwrap();
+        cli.network_options.merge_into(&config).unwrap();
+        assert_eq!(config.get_routes(), Some(vec![]));
+        assert_eq!(
+            config.get_routes_v6(),
+            Some(vec!["::/1".parse().unwrap(), "8000::/1".parse().unwrap()])
+        );
+        assert_eq!(config.get_vpn_dns(), Some("fd79::1".parse().unwrap()));
+        Cli::try_parse_from(["easytier-core"])
+            .unwrap()
+            .network_options
+            .merge_into(&config)
+            .unwrap();
+        assert_eq!(config.get_vpn_dns(), Some("fd79::1".parse().unwrap()));
+        assert!(Cli::try_parse_from(["easytier-core", "--vpn-dns", "invalid"]).is_err());
+        assert!(
+            Cli::try_parse_from(["easytier-core", "--manual-routes-v6", "fd00::/129"]).is_err()
+        );
+    }
+
     use super::*;
     use crate::proto::common::CompressionAlgoPb;
 

@@ -118,6 +118,8 @@ const FORM_MANAGED_TOML_FIELDS: &[&str] = &[
     "hostname",
     "instance_id",
     "ipv4",
+    "ipv6",
+    "vpn_dns",
     "ipv6_public_addr_provider",
     "ipv6_public_addr_auto",
     "ipv6_public_addr_prefix",
@@ -131,6 +133,7 @@ const FORM_MANAGED_TOML_FIELDS: &[&str] = &[
     "proxy_network",
     "vpn_portal_config",
     "routes",
+    "routes_v6",
     "socks5_proxy",
     "port_forward",
     "secure_mode",
@@ -265,6 +268,18 @@ impl NetworkConfigExt for NetworkConfig {
             cfg.set_dhcpv6_config(super::DhcpConfig::from_cidr(cidr)?);
         }
         cfg.set_inst_name(self.network_name.clone().unwrap_or_default());
+
+        if let Some(ipv6) = self.virtual_ipv6.as_ref().filter(|value| !value.is_empty()) {
+            cfg.set_ipv6(Some(ipv6.parse().with_context(|| {
+                format!("failed to parse ipv6 inet address: {ipv6}")
+            })?));
+        }
+        if let Some(dns) = self.vpn_dns.as_ref().filter(|value| !value.is_empty()) {
+            cfg.set_vpn_dns(Some(
+                dns.parse()
+                    .with_context(|| format!("failed to parse VPN DNS server: {dns}"))?,
+            ));
+        }
 
         // The web UI does not expose credential inputs directly, but imported/saved
         // NetworkConfig objects still need to preserve credential-mode instances via
@@ -419,6 +434,22 @@ impl NetworkConfigExt for NetworkConfig {
                 );
             }
             cfg.set_routes(Some(routes));
+        }
+
+        if self
+            .enable_manual_routes_v6
+            .unwrap_or(!self.routes_v6.is_empty())
+        {
+            cfg.set_routes_v6(Some(
+                self.routes_v6
+                    .iter()
+                    .map(|route| {
+                        route
+                            .parse()
+                            .with_context(|| format!("failed to parse route v6: {route}"))
+                    })
+                    .collect::<Result<Vec<cidr::Ipv6Cidr>, _>>()?,
+            ));
         }
 
         if !self.exit_nodes.is_empty() {
@@ -579,6 +610,13 @@ impl NetworkConfigExt for NetworkConfig {
         if let Some(ipv4) = config.get_ipv4() {
             result.virtual_ipv4 = Some(ipv4.address().to_string());
             result.network_length = Some(ipv4.network_length() as i32);
+        }
+
+        result.virtual_ipv6 = config.get_ipv6().map(|addr| format!("{addr:#}"));
+        result.vpn_dns = config.get_vpn_dns().map(|dns| dns.to_string());
+        if let Some(routes) = config.get_routes_v6() {
+            result.enable_manual_routes_v6 = Some(true);
+            result.routes_v6 = routes.iter().map(ToString::to_string).collect();
         }
 
         if config.get_ipv6_public_addr_provider() != default_config.get_ipv6_public_addr_provider()
