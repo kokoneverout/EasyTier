@@ -1,0 +1,73 @@
+name: Alignment core release
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Candidate platform
+        type: choice
+        options: [linux-x86_64, windows-x86_64]
+        default: linux-x86_64
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_PROFILE_RELEASE_LTO: 'false'
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  candidate:
+    runs-on: ${{ inputs.platform == 'windows-x86_64' && 'windows-2022' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    env:
+      TARGET: ${{ inputs.platform == 'windows-x86_64' && 'x86_64-pc-windows-msvc' || 'x86_64-unknown-linux-musl' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          gui: 'false'
+          pnpm: 'false'
+          token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: alignment-core-${{ env.TARGET }}
+          cache-on-failure: true
+      - name: Configuration regression
+        run: cargo test --locked -p easytier-core --lib --no-default-features --features browser-config config::
+      - name: Runtime regression
+        run: >-
+          cargo test --locked -p easytier --lib --features aes-gcm,mimalloc --
+          common::underlay::tests instance::windows_exit_dns::tests
+          instance::factory::mobile_tun::tests instance::shared_virtual_nic::tests
+          alignment_mobile_claims tunnel::quic::crypto::tests common::dns::tests
+          core::tests::custom_dualstack common::ifcfg::windows::tests
+      - name: Release build
+        run: cargo build --release --locked -p easytier --bins --target "$TARGET" --features aes-gcm,mimalloc
+      - name: Package
+        run: |
+          mkdir -p artifacts
+          suffix=''
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix='.exe'; fi
+          cp "target/$TARGET/release/easytier-core$suffix" artifacts/
+          cp "target/$TARGET/release/easytier-cli$suffix" artifacts/
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            find easytier/third_party/x86_64 -maxdepth 1 -type f \( -name '*.dll' -o -name '*.sys' \) -exec cp {} artifacts/ \;
+          fi
+          printf 'Commit: %s\nTarget: %s\nLTO: false\nCodegen units: 16\nFeatures: aes-gcm,mimalloc\nRun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$TARGET" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
+          (cd artifacts && sha256sum easytier-* > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v5
+        with:
+          name: alignment-${{ inputs.platform }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
