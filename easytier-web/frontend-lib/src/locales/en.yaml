@@ -811,3 +811,46 @@ disable_relay_data: Disable Data Relay
 disable_relay_data_help: Do not relay data packets for other peers, so this node carries no traffic it did not originate.
 prefer_peer_relay: Prefer Peer Relay
 prefer_peer_relay_help: Prefer a credential peer that already relays to a destination over advertising another direct edge to the same destination.
+
+app_routing:
+  title: App Routing
+  apply: Apply
+  mode_include: Selected apps only
+  mode_all: All apps
+  include_hint: Selected apps use the current VPN routes and exit; LAN bypass rules stay in effect
+  all_hint: All apps use the current VPN routes and exit; EasyTier itself stays direct
+  search_placeholder: Search app name or package
+  clear_search: Clear
+  clear_selection: Clear selection
+  show_system: Show system services
+  selected_count: '{count} selected'
+  found_count: '{count} found'
+  loading: Reading apps
+  load_failed: Failed to read the app list
+  retry: Retry
+  no_match: No apps found
+  empty_selection_hint: Select at least one app before applying
+  uninstalled_apps: '{count} uninstalled or unavailable apps'
+  uninstalled_label: Uninstalled app
+  legacy_all_note: Currently following the legacy all-apps mode
+  shared_uid_note: These apps share a network identity and are routed together
+  lockdown_note: "System \"Block connections without VPN\" is on: unselected apps may lose connectivity instead of going direct"
+  applying: Applying, please wait
+  status_unapplied: Unapplied changes
+  status_applied: Applied
+  status_next_start: Saved; takes effect on next connect
+  status_applied_with_skipped: Applied; {count} apps unavailable
+  status_restored: Apply failed; previous settings restored
+  status_stopped: Apply failed; VPN stopped, retry available
+  apply_failed: 'Apply failed. Please retry; settings have not been confirmed restored.'
+  apply_failed_empty: 'Cannot apply an empty list: select at least one installed app'
+  discard_confirm: Discard unapplied changes?
+  keep_editing: Keep editing
+  discard: Discard
+  back: Back
+  selected_state_on: will use the VPN
+  selected_state_off: stays on the original network
+
+virtual_ipv6: Static IPv6 address and prefix
+vpn_dns: VPN DNS server
+manual_routes_v6: Manual IPv6 routes

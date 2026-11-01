@@ -811,3 +811,46 @@ disable_relay_data: 不转发数据
 disable_relay_data_help: 不转发其他节点的数据包，本节点不承载自身以外的流量。
 prefer_peer_relay: 优先凭证节点转发
 prefer_peer_relay_help: 优先通过已经转发到目标节点的凭证节点转发，而不是为同一目标再通告一条直连路径。
+
+app_routing:
+  title: 应用分流
+  apply: 应用
+  mode_include: 仅选中的应用
+  mode_all: 所有应用
+  include_hint: 所选应用使用当前 VPN 的路由与出口；局域网绕过规则继续生效
+  all_hint: 所有应用使用当前 VPN 的路由与出口；EasyTier 自身保持直连
+  search_placeholder: 搜索应用名称或包名
+  clear_search: 清除
+  clear_selection: 清空选择
+  show_system: 显示系统服务
+  selected_count: 已选 {count} 个
+  found_count: 找到 {count} 个
+  loading: 正在读取应用
+  load_failed: 读取应用列表失败
+  retry: 重试
+  no_match: 没有找到应用
+  empty_selection_hint: 请至少选择一个应用后再应用
+  uninstalled_apps: 有 {count} 个已卸载或不可用应用
+  uninstalled_label: 已卸载应用
+  legacy_all_note: 当前沿用旧版所有应用模式
+  shared_uid_note: 这些应用共用网络身份，将一同分流
+  lockdown_note: 系统已开启“阻止不使用 VPN 的连接”，未选应用可能被断网而非直连
+  applying: 正在应用，请稍候
+  status_unapplied: 有未应用的修改
+  status_applied: 已应用
+  status_next_start: 已保存，下次连接生效
+  status_applied_with_skipped: 已应用，有 {count} 个应用不可用
+  status_restored: 应用失败，已恢复原设置
+  status_stopped: 应用失败，VPN 已停止，可重试
+  apply_failed: '应用失败，请重试；当前设置未能确认恢复。'
+  apply_failed_empty: 不能保存空名单：请至少选择一个已安装的应用
+  discard_confirm: 放弃未应用的修改？
+  keep_editing: 继续编辑
+  discard: 放弃
+  back: 返回
+  selected_state_on: 将走出口
+  selected_state_off: 保持原网络
+
+virtual_ipv6: 静态 IPv6 地址与前缀
+vpn_dns: VPN DNS 服务器
+manual_routes_v6: IPv6 手动路由

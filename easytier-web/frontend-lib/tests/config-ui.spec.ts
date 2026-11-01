@@ -43,6 +43,7 @@ const CONFIG_CHECKBOX_FIELDS = [
 
 const CONFIG_TOGGLE_FIELDS = [
   'enable_relay_network_whitelist',
+  'enable_manual_routes_v6',
   'enable_manual_routes',
   'enable_socks5',
 ] as const satisfies readonly (keyof NetworkConfig)[]
@@ -315,6 +316,8 @@ function makeConfig(): NetworkConfig {
     ...config,
     dhcp: false,
     virtual_ipv4: '10.1.2.3',
+    virtual_ipv6: 'fd12::3/64',
+    vpn_dns: 'fd12::53',
     network_length: 24,
     network_name: 'mesh-a',
     network_secret: 'secret-a',
@@ -342,6 +345,8 @@ function makeConfig(): NetworkConfig {
     relay_network_whitelist: ['network-a'],
     enable_manual_routes: true,
     routes: ['192.168.0.0/16'],
+    enable_manual_routes_v6: true,
+    routes_v6: ['2001:db8::/32'],
     enable_socks5: true,
     socks5_port: 1086,
     exit_nodes: ['exit-a'],
@@ -408,6 +413,9 @@ describe('Config.vue network config projection', () => {
     expect(input(wrapper, '#network_name').value).toBe('mesh-a')
     expect(input(wrapper, '#network_secret').value).toBe('secret-a')
     expect(input(wrapper, '#virtual_ip').value).toBe('10.1.2.3')
+    expect(input(wrapper, '#virtual_ipv6').value).toBe('fd12::3/64')
+    expect(input(wrapper, '#vpn_dns').value).toBe('fd12::53')
+    expect(input(wrapper, '#routes_v6').value).toBe('2001:db8::/32')
     expect(input(wrapper, '#initial_nodes').value).toBe('tcp://peer-a:11010,udp://peer-b:11010')
     expect(input(wrapper, '#virtual_ip_auto').checked).toBe(false)
     expect(input(wrapper, '#latency_first').checked).toBe(true)
@@ -443,6 +451,9 @@ describe('Config.vue network config projection', () => {
     await setInput(wrapper, '#network_name', 'mesh-edited')
     await setInput(wrapper, '#network_secret', 'secret-edited')
     await setInput(wrapper, '#virtual_ip', '10.7.7.7')
+    await setInput(wrapper, '#virtual_ipv6', 'fd34::7/64')
+    await setInput(wrapper, '#vpn_dns', 'fd34::53')
+    await setInput(wrapper, '#routes_v6', '::/1,8000::/1')
     await setInput(wrapper, '#initial_nodes', ' tcp://peer-x:11010, , udp://peer-y:11010 ')
     await wrapper.find('#no_tun').setValue(false)
     await wrapper.find('#disable_ipv6').setValue(false)
@@ -507,6 +518,9 @@ describe('Config.vue network config projection', () => {
 
     const backend = toBackendNetworkConfig(curNetwork)
     expect(backend).toMatchObject({
+      virtual_ipv6: 'fd34::7/64',
+      vpn_dns: 'fd34::53',
+      routes_v6: ['::/1', '8000::/1'],
       virtual_ipv4: '10.7.7.7',
       network_name: 'mesh-edited',
       network_secret: 'secret-edited',

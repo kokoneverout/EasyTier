@@ -7,9 +7,15 @@ import {
   prepare_vpn,
   start_vpn,
   stop_vpn,
+  get_app_routing_policy,
+  set_app_routing_policy,
+  type AppRoutingPolicy,
+  type GetAppRoutingPolicyResponse,
+  type SkippedPackage,
   type VpnTileAction,
 } from 'tauri-plugin-vpnservice-api'
 import { collectNetworkInfo, getConfig, getMobileTunConfig, listNetworkInstanceIds, setTunFd } from './backend'
+import { ensureAppRoutingPolicyInitialized } from './app_routing'
 
 interface vpnStatus {
   running: boolean
@@ -24,7 +30,7 @@ const VPN_RECONCILE_MAX_ATTEMPTS = 60
 
 let vpnReconcileGeneration = 0
 let vpnReconcileAttempts = 0
-let vpnReconcileQueue: Promise<void> = Promise.resolve()
+let vpnReconcileQueue: Promise<unknown> = Promise.resolve()
 let vpnPermissionRequest: Promise<boolean> | null = null
 let vpnTileActionHandler: ((action: VpnTileAction) => Promise<void>) | undefined
 let vpnTileActionQueue: Promise<void> = Promise.resolve()
@@ -33,6 +39,18 @@ let vpnStartingInstanceIds: string[] | undefined
 let vpnAttachment: Promise<MobileTunConfig> | null = null
 let vpnErrorHandler: ((error: string) => void) | undefined
 let vpnMemberErrors = ''
+let appliedPolicySignature: string | null = null
+let activeStartRequestId: string | undefined
+let startFailure: Error | undefined
+let requestSequence = 0
+
+function routingSignature(response: GetAppRoutingPolicyResponse) {
+  return response.policy?.mode === 'include'
+    ? `include:${[...new Set(response.effectivePolicy?.uids ?? [])].sort((a, b) => a - b).join(',')}`
+    : 'all'
+}
+
+export async function isVpnRunning() { return (await get_vpn_status())?.running ?? false }
 
 export function setMobileVpnErrorHandler(handler?: (error: string) => void) {
   vpnErrorHandler = handler
@@ -160,6 +178,7 @@ function scheduleVpnReconcile(generation: number, reason: string) {
 }
 
 function resetVpnConfigStatus() {
+  appliedPolicySignature = null
   vpnAttachedInstanceIds = []
   curVpnStatus.ipv4Addrs = []
   curVpnStatus.routes = []
@@ -176,11 +195,17 @@ function syncVpnStatusFromNative(status: Awaited<ReturnType<typeof get_vpn_statu
   curVpnStatus.ipv4Addrs = [...(status?.ipv4Addrs ?? [])]
   curVpnStatus.routes = [...(status?.routes ?? [])]
   curVpnStatus.dns = status?.dns ?? undefined
+  appliedPolicySignature = status?.applicationMode ? routingSignature({
+    policy: { schemaVersion: 1, mode: status.applicationMode, packages: [] },
+    effectivePolicy: status.effectivePolicy,
+    skippedPackages: [],
+  }) : null
 }
 
 async function waitVpnStatus(target_status: boolean, timeout_sec: number) {
   const start_time = Date.now()
   while (curVpnStatus.running !== target_status) {
+    if (target_status && startFailure) throw startFailure
     if (Date.now() - start_time > timeout_sec * 1000) {
       throw new Error('wait vpn status timeout')
     }
@@ -203,6 +228,7 @@ async function doStopVpn(force = false) {
     return
   }
   await detachTunFd()
+  activeStartRequestId = undefined
   console.log('stop vpn')
   const stop_ret = await stop_vpn()
   console.log('stop vpn', JSON.stringify((stop_ret)))
@@ -218,6 +244,7 @@ async function doStartVpn(
   ipv4Addrs: string[],
   routes: string[],
   dns: string | undefined,
+  routing: GetAppRoutingPolicyResponse,
 ) {
   if (curVpnStatus.running) {
     return
@@ -225,13 +252,18 @@ async function doStartVpn(
 
   vpnStartingInstanceIds = instanceIds
   vpnAttachment = null
+  startFailure = undefined
+  appliedPolicySignature = null
+  activeStartRequestId = `${Date.now()}-${++requestSequence}`
 
   console.log('start vpn service', ipv4Addrs, routes, dns)
   const request = {
     ipv4Addrs,
     routes,
     dns,
-    disallowedApplications: ['com.kkrainbow.easytier'],
+    applicationMode: routing.policy!.mode,
+    allowedApplications: routing.policy!.mode === 'include' ? routing.policy!.packages : undefined,
+    requestId: activeStartRequestId,
     mtu: 1300,
   }
 
@@ -255,6 +287,7 @@ async function doStartVpn(
   curVpnStatus.routes = routes
   curVpnStatus.dns = dns
   vpnAttachedInstanceIds = [...actual.instance_ids].sort()
+  appliedPolicySignature ??= routingSignature(routing)
   if (JSON.stringify(actual.addresses) !== JSON.stringify(ipv4Addrs)
     || JSON.stringify(actual.routes) !== JSON.stringify(routes)
     || (actual.dns ?? undefined) !== dns) {
@@ -272,7 +305,15 @@ async function waitVpnAttachment() {
 }
 
 async function onVpnServiceStart(payload: any) {
+  if (payload.requestId && payload.requestId !== activeStartRequestId) return
   console.log('vpn service start', JSON.stringify(payload))
+  if (payload.effectivePolicy) {
+    appliedPolicySignature = routingSignature({
+      policy: { schemaVersion: 1, mode: payload.effectivePolicy.mode, packages: [] },
+      effectivePolicy: payload.effectivePolicy,
+      skippedPackages: payload.skippedPackages ?? [],
+    })
+  }
   curVpnStatus.running = true
   if (payload.fd) {
     vpnAttachment = setTunFd(payload.fd, vpnStartingInstanceIds)
@@ -310,6 +351,12 @@ async function registerVpnServiceListener() {
     onVpnServiceStop,
   )
 
+  await addPluginListener('vpnservice', 'vpn_service_error', (payload: any) => {
+    if (payload.requestId && payload.requestId !== activeStartRequestId) return
+    startFailure = new Error(payload.errorMsg || 'establish_failed')
+    vpnErrorHandler?.(startFailure.message)
+  })
+
   await addPluginListener(
     'vpnservice',
     'vpn_tile_action',
@@ -321,7 +368,7 @@ async function registerVpnServiceListener() {
   )
 }
 
-async function reconcileNetworkInstance(generation: number) {
+async function reconcileNetworkInstance(generation: number, propagateStartError = false) {
   if (!isCurrentVpnReconcile(generation))
     return
 
@@ -430,6 +477,15 @@ async function reconcileNetworkInstance(generation: number) {
   const sortedRoutes = [...config.routes].sort()
   const instanceIds = [...config.instance_ids].sort()
   const dns = config.dns ?? undefined
+  await ensureAppRoutingPolicyInitialized()
+  const routing = await get_app_routing_policy()
+  if (!isCurrentVpnReconcile(generation)) return
+  if (!routing.policy) throw new Error('app_policy_missing')
+  if (routing.policy.mode === 'include' && !routing.effectivePolicy?.uids.length) {
+    if (curVpnStatus.running) await doStopVpn()
+    vpnErrorHandler?.('no_effective_apps')
+    throw new Error('no_effective_apps')
+  }
   // A replacement runtime needs its own attachment even with identical OS routes.
   const membersChanged = JSON.stringify(instanceIds) !== JSON.stringify(vpnAttachedInstanceIds)
   const configChanged
@@ -437,7 +493,7 @@ async function reconcileNetworkInstance(generation: number) {
       || JSON.stringify(sortedRoutes) !== JSON.stringify(curVpnStatus.routes)
       || dns !== curVpnStatus.dns
 
-  if (!curVpnStatus.running || configChanged || membersChanged) {
+  if (!curVpnStatus.running || configChanged || membersChanged || appliedPolicySignature !== routingSignature(routing)) {
     if (curVpnStatus.running) {
       try {
         await doStopVpn()
@@ -451,7 +507,7 @@ async function reconcileNetworkInstance(generation: number) {
       return
 
     try {
-      await doStartVpn(instanceIds, sortedIpv4Addrs, sortedRoutes, dns)
+      await doStartVpn(instanceIds, sortedIpv4Addrs, sortedRoutes, dns, routing)
       if (!isCurrentVpnReconcile(generation))
         await doStopVpn()
     }
@@ -461,11 +517,13 @@ async function reconcileNetworkInstance(generation: number) {
         return
       }
       console.error('start vpn service failed', error)
+      vpnErrorHandler?.(String(error))
+      if (propagateStartError) throw error
     }
   }
 }
 
-function enqueueVpnTask(task: () => Promise<void>) {
+function enqueueVpnTask<T>(task: () => Promise<T>) {
   const run = vpnReconcileQueue
     .catch((e) => {
       console.error('previous vpn service reconcile failed', e)
@@ -534,4 +592,39 @@ export async function prepareVpnService(instanceId: string) {
 export async function syncMobileVpnService() {
   syncVpnStatusFromNative(await get_vpn_status())
   await onNetworkInstanceChange('')
+}
+
+export type ApplyPolicyOutcome =
+  | { status: 'applied', skippedPackages: SkippedPackage[] }
+  | { status: 'saved' }
+  | { status: 'restored' }
+  | { status: 'stopped' }
+
+export async function applyAppRoutingPolicy(policy: AppRoutingPolicy): Promise<ApplyPolicyOutcome> {
+  return enqueueVpnTask<ApplyPolicyOutcome>(async () => {
+    const generation = vpnReconcileGeneration
+    const checked = await set_app_routing_policy(policy, true)
+    const previous = (await get_app_routing_policy()).policy
+    const wasRunning = curVpnStatus.running
+    await set_app_routing_policy(checked.policy, false)
+    if (!wasRunning || !isCurrentVpnReconcile(generation)) return { status: 'saved' }
+    try {
+      await reconcileNetworkInstance(generation, true)
+      if (!isCurrentVpnReconcile(generation)) return { status: 'saved' }
+      if (!curVpnStatus.running) throw new Error('policy_apply_did_not_start_vpn')
+      return { status: 'applied', skippedPackages: checked.skippedPackages }
+    } catch (error) {
+      if (!isCurrentVpnReconcile(generation)) return { status: 'saved' }
+      if (!previous) throw error
+      await set_app_routing_policy(previous, false)
+      try {
+        await doStopVpn(true)
+        await reconcileNetworkInstance(generation, true)
+        if (!isCurrentVpnReconcile(generation)) return { status: 'saved' }
+        if (curVpnStatus.running) return { status: 'restored' }
+      } catch (restoreError) { console.error('restore VPN policy failed', restoreError) }
+      await doStopVpn(true)
+      return { status: 'stopped' }
+    }
+  })
 }

@@ -28,11 +28,13 @@ import {
   saveVpnTileStoppedInstanceIds,
 } from '~/composables/config'
 import ModeSwitcher from '~/components/ModeSwitcher.vue'
+import AppRoutingPage from '~/components/mobile/AppRoutingPage.vue'
 import { getEasytierVersion, getServiceStatus } from '~/composables/backend'
 
 const { t, locale } = useI18n()
 const confirm = useConfirm()
 const aboutVisible = ref(false)
+const appRoutingVisible = ref(false)
 const modeDialogVisible = ref(false)
 const currentMode = ref<Mode>({ mode: 'normal' })
 const editingMode = ref<Mode>({ mode: 'normal' })
@@ -233,7 +235,10 @@ onMounted(async () => {
   const cleanupFns: Array<() => void> = []
 
   if (type() === 'android') {
-    setMobileVpnErrorHandler(error => toast.add({ severity: 'error', summary: t('error'), detail: error, life: 10000 }))
+    setMobileVpnErrorHandler(error => {
+      if (error === 'no_effective_apps') appRoutingVisible.value = true
+      else toast.add({ severity: 'error', summary: t('error'), detail: error, life: 10000 })
+    })
     cleanupFns.push(() => setMobileVpnErrorHandler())
     try {
       await initMobileVpnService()
@@ -404,6 +409,12 @@ function getLabel(item: MenuItem) {
 
 const setting_menu_items: Ref<MenuItem[]> = ref([
   {
+    label: () => t('app_routing.title'),
+    icon: 'pi pi-list-check',
+    command: () => { appRoutingVisible.value = true },
+    visible: () => type() === 'android',
+  },
+  {
     label: () => t('exchange_language'),
     icon: 'pi pi-language',
     command: async () => {
@@ -550,7 +561,8 @@ const configServerConnectionStatus = computed(() => {
 
     <Menu ref="log_menu" :model="log_menu_items_popup" :popup="true" />
 
-    <RemoteManagement v-if="clientRunning" class="flex-1 overflow-y-auto" :api="remoteClient"
+    <AppRoutingPage v-if="appRoutingVisible" @close="appRoutingVisible = false" />
+    <RemoteManagement v-if="clientRunning" v-show="!appRoutingVisible" class="flex-1 overflow-y-auto" :api="remoteClient"
       :pause-auto-refresh="isModeSaving" v-model:instance-id="instanceId" />
     <div v-else class="empty-state flex-1 flex flex-col items-center py-12">
       <i class="pi pi-server text-5xl text-secondary mb-4 opacity-50"></i>

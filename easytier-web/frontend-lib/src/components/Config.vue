@@ -315,6 +315,17 @@ function removeVpnPortalClient(index: number) {
 
               <div class="flex flex-row gap-x-9 flex-wrap">
                 <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <label for="virtual_ipv6">{{ t('virtual_ipv6') }}</label>
+                  <InputText id="virtual_ipv6" v-model="curNetwork.virtual_ipv6" :disabled="curNetwork.dhcpv6" placeholder="fd12::2/64" />
+                </div>
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <label for="vpn_dns">{{ t('vpn_dns') }}</label>
+                  <InputText id="vpn_dns" v-model="curNetwork.vpn_dns" placeholder="192.0.2.53" />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
                   <label for="network_name">{{ t('network_name') }}</label>
                   <InputText id="network_name" v-model="curNetwork.network_name" aria-describedby="network_name-help" />
                   <div v-if="!hideSecureMode && identityMode === 'secret'" class="flex items-center gap-2">
@@ -517,6 +528,18 @@ function removeVpnPortalClient(index: number) {
                         :suggestions="whitelistSuggestions" @complete="searchWhitelistSuggestions" />
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap ">
+                <div class="flex flex-col gap-2 grow">
+                  <div class="flex">
+                    <label for="routes_v6">{{ t('manual_routes_v6') }}</label>
+                  </div>
+                  <ToggleButton v-model="curNetwork.enable_manual_routes_v6" on-icon="pi pi-check" off-icon="pi pi-times"
+                    :on-label="t('off_text')" :off-label="t('on_text')" class="w-48" />
+                  <AutoComplete v-if="curNetwork.enable_manual_routes_v6" id="routes_v6" v-model="curNetwork.routes_v6"
+                    multiple fluid :typeahead="false" :suggestions="[]" placeholder="::/1, 8000::/1" />
                 </div>
               </div>
 

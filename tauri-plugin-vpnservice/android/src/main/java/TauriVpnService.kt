@@ -14,7 +14,11 @@ import android.system.OsConstants.AF_INET6
 import java.net.InetAddress
 import java.util.Arrays
 
+import android.content.pm.PackageManager
+import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
+
+class VpnEstablishException(val code: String, message: String) : Exception(message)
 
 class TauriVpnService : VpnService() {
     companion object {
@@ -29,6 +33,15 @@ class TauriVpnService : VpnService() {
         const val IPV4_ADDRS = "IPV4_ADDRS"
         const val ROUTES = "ROUTES"
         const val DNS = "DNS"
+        @JvmField @Volatile var interfaceEstablished: Boolean = false
+        @JvmField var applicationMode: String? = null
+        @JvmField var effectivePolicy: JSObject? = null
+        @JvmField var skippedPackages: JSArray? = null
+        @JvmField var allowedApplications: Array<String> = emptyArray()
+        @JvmField var disallowedApplications: Array<String> = emptyArray()
+        const val APPLICATION_MODE = "APPLICATION_MODE"
+        const val ALLOWED_APPLICATIONS = "ALLOWED_APPLICATIONS"
+        const val REQUEST_ID = "REQUEST_ID"
         const val DISALLOWED_APPLICATIONS = "DISALLOWED_APPLICATIONS"
         const val MTU = "MTU"
 
@@ -53,11 +66,25 @@ class TauriVpnService : VpnService() {
         routes = args?.getStringArray(ROUTES) ?: emptyArray()
         dns = args?.getString(DNS)
 
-        vpnInterface = createVpnInterface(args)
+        try {
+            vpnInterface = createVpnInterface(args)
+            interfaceEstablished = true
+        } catch (error: Exception) {
+            val data = JSObject()
+            data.put("errorMsg", (error as? VpnEstablishException)?.code ?: "establish_failed")
+            data.put("requestId", args?.getString(REQUEST_ID))
+            triggerCallback("vpn_service_error", data)
+            clearStatus()
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         println("vpn created ${vpnInterface.fd}")
 
         var event_data = JSObject()
         event_data.put("fd", vpnInterface.fd)
+        event_data.put("requestId", args?.getString(REQUEST_ID))
+        event_data.put("effectivePolicy", effectivePolicy)
+        event_data.put("skippedPackages", skippedPackages)
         triggerCallback("vpn_service_start", event_data)
         EasyTierVpnTileService.requestStateUpdate(this)
 
@@ -91,7 +118,7 @@ class TauriVpnService : VpnService() {
     }
 
     private fun disconnect() {
-        if (self == this && this::vpnInterface.isInitialized) {
+        if (interfaceEstablished && this::vpnInterface.isInitialized) {
             triggerCallback("vpn_service_stop", JSObject())
             vpnInterface.close()
         }
@@ -99,6 +126,12 @@ class TauriVpnService : VpnService() {
     }
 
     private fun clearStatus() {
+        interfaceEstablished = false
+        applicationMode = null
+        effectivePolicy = null
+        skippedPackages = null
+        allowedApplications = emptyArray()
+        disallowedApplications = emptyArray()
         ipv4Addr = null
         ipv4Addrs = emptyArray()
         routes = emptyArray()
@@ -214,16 +247,73 @@ class TauriVpnService : VpnService() {
             builder.addRoute(ipParts[0], ipParts[1].toInt())
         }
         
-        for (app in disallowedApplications) {
-            builder.addDisallowedApplication(app)
+        val mode = args?.getString(APPLICATION_MODE) ?: AppRoutingPolicyStore.MODE_ALL
+        val allowedInput = args?.getStringArray(ALLOWED_APPLICATIONS) ?: emptyArray()
+        val disallowedInput = disallowedApplications
+        // Re-resolve the policy against the current install state to close the
+        // uninstall race between the plugin pre-check and this establish.
+        val resolution = if (mode == AppRoutingPolicyStore.MODE_INCLUDE) {
+            val identities = AppCatalog.getInstalledAppIdentities(this)
+            val resolved = AppRoutingResolver.resolveInclude(identities, AppCatalog.getSelfUid(this), allowedInput.toList())
+            if (resolved.effective.packages.isEmpty()) {
+                throw VpnEstablishException("no_effective_apps", "no effective applications selected")
+            }
+            val added = mutableListOf<String>()
+            val skipped = resolved.skipped.toMutableList()
+            for (pkg in resolved.effective.packages) {
+                try {
+                    builder.addAllowedApplication(pkg)
+                    added.add(pkg)
+                } catch (e: PackageManager.NameNotFoundException) {
+                    skipped.add(SkippedPackage(pkg, "not_installed"))
+                }
+            }
+            if (added.isEmpty()) {
+                throw VpnEstablishException("no_effective_apps", "all selected packages vanished")
+            }
+            val addedSet = added.toSet()
+            resolved.copy(
+                effective = resolved.effective.copy(
+                    packages = added.sorted(),
+                    uids = identities.filter { it.packageName in addedSet }.map { it.uid }.distinct().sorted(),
+                ),
+                skipped = skipped.distinctBy { it.packageName },
+            )
+        } else {
+            val disallowed = (disallowedInput.toList() + packageName).distinct()
+            for (pkg in disallowed) {
+                builder.addDisallowedApplication(pkg)
+            }
+            AppRoutingResolver.resolveAll()
         }
 
-        return builder.also {
+
+
+        val iface = builder.also {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 it.setMetered(false)
             }
         }
         .establish()
         ?: throw IllegalStateException("Failed to init VpnService")
+        // Record what was actually applied, not what was requested.
+        TauriVpnService.routes = routes
+        TauriVpnService.dns = dns
+        applicationMode = mode
+        allowedApplications = if (mode == AppRoutingPolicyStore.MODE_INCLUDE) {
+            resolution.effective.packages.toTypedArray()
+        } else {
+            emptyArray()
+        }
+        TauriVpnService.disallowedApplications = if (mode == AppRoutingPolicyStore.MODE_ALL) {
+            (disallowedInput.toList() + packageName).distinct().toTypedArray()
+        } else {
+            emptyArray()
+        }
+        effectivePolicy = JSObject.fromJSONObject(AppRoutingResolver.effectiveToJson(resolution.effective))
+        skippedPackages = JSArray.from(AppRoutingResolver.skippedToJson(resolution.skipped))
+
+
+        return iface
     }
 }

@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => {
       info: { map: { [instanceId]: networkInfo.get(instanceId) } },
     })),
     consumeVpnTileAction: vi.fn(async () => ({})),
+    getPolicy: vi.fn<() => Promise<any>>(),
+    setPolicy: vi.fn<(policy: any, validateOnly?: boolean) => Promise<any>>(),
     getConfig: vi.fn(async (instanceId: string) => configs.get(instanceId)),
     getVpnStatus: vi.fn<() => Promise<Record<string, unknown>>>(async () => ({ running: false })),
     listNetworkInstanceIds: vi.fn<() => Promise<{ running_inst_ids: unknown[] }>>(async () => ({ running_inst_ids: [] })),
@@ -49,12 +51,16 @@ vi.mock('easytier-frontend-lib', () => ({
 }))
 
 vi.mock('tauri-plugin-vpnservice-api', () => ({
+  get_app_routing_policy: mocks.getPolicy,
+  set_app_routing_policy: mocks.setPolicy,
   consume_vpn_tile_action: mocks.consumeVpnTileAction,
   get_vpn_status: mocks.getVpnStatus,
   prepare_vpn: mocks.prepareVpn,
   start_vpn: mocks.startVpn,
   stop_vpn: mocks.stopVpn,
 }))
+
+vi.mock('./app_routing', () => ({ ensureAppRoutingPolicyInitialized: vi.fn(async () => {}) }))
 
 vi.mock('./backend', () => ({
   collectNetworkInfo: mocks.collectNetworkInfo,
@@ -146,6 +152,14 @@ beforeEach(() => {
   mocks.consumeVpnTileAction.mockReset()
   mocks.consumeVpnTileAction.mockResolvedValue({})
   mocks.getConfig.mockClear()
+  mocks.getPolicy.mockReset()
+  mocks.getPolicy.mockResolvedValue({ policy: { schemaVersion: 1, mode: 'all', packages: [] }, effectivePolicy: { mode: 'all', packages: [], uids: [] }, skippedPackages: [] })
+  mocks.setPolicy.mockReset()
+  mocks.setPolicy.mockImplementation(async (policy, validateOnly) => {
+    const result = { policy, effectivePolicy: { mode: policy.mode, packages: policy.packages, uids: policy.packages.length ? [10001] : [] }, skippedPackages: [] }
+    if (!validateOnly) mocks.getPolicy.mockResolvedValue(result)
+    return result
+  })
   mocks.getVpnStatus.mockReset()
   mocks.getVpnStatus.mockResolvedValue({ running: false })
   mocks.listNetworkInstanceIds.mockReset()
@@ -627,6 +641,95 @@ describe('mobile VPN reconciliation', () => {
 
     expect(mocks.stopVpn).not.toHaveBeenCalled()
     expect(mocks.startVpn).not.toHaveBeenCalled()
+  })
+})
+
+describe('application policy on upstream VPN lifecycle', () => {
+  it('lets a user stop supersede an in-flight policy change', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    let releaseValidation!: () => void
+    let validationStarted!: () => void
+    const started = new Promise<void>(resolve => { validationStarted = resolve })
+    const gate = new Promise<void>(resolve => { releaseValidation = resolve })
+    const validate = mocks.setPolicy.getMockImplementation()!
+    mocks.setPolicy.mockImplementationOnce(async (policy, validateOnly) => {
+      validationStarted()
+      await gate
+      return validate(policy, validateOnly)
+    })
+    const apply = vpn.applyAppRoutingPolicy({ schemaVersion: 1, mode: 'include', packages: ['app.a'] })
+    await started
+    mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: [] })
+    const stop = vpn.onNetworkInstancesChange()
+    releaseValidation()
+    expect((await apply).status).toBe('saved')
+    await stop
+    expect(mocks.startVpn).toHaveBeenCalledTimes(1)
+    expect(mocks.stopVpn).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports an establish error immediately without waiting for the start timeout', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    const report = vi.fn()
+    vpn.setMobileVpnErrorHandler(report)
+    mocks.startVpn.mockImplementationOnce(async () => {
+      await mocks.listeners.get('vpn_service_error')?.({ errorMsg: 'establish_failed' })
+      return {}
+    })
+    await vpn.onNetworkInstanceChange('A')
+    expect(report).toHaveBeenCalledWith('establish_failed')
+    expect(mocks.setTunFd).not.toHaveBeenCalledWith(1, expect.anything())
+  })
+
+  it('starts with the selected applications and ignores stale start events', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    mocks.getPolicy.mockResolvedValue({ policy: { schemaVersion: 1, mode: 'include', packages: ['app.a'] }, effectivePolicy: { mode: 'include', packages: ['app.a'], uids: [10001] }, skippedPackages: [] })
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    expect(mocks.startVpn).toHaveBeenCalledWith(expect.objectContaining({ applicationMode: 'include', allowedApplications: ['app.a'], requestId: expect.any(String) }))
+    const attachments = mocks.setTunFd.mock.calls.length
+    await mocks.listeners.get('vpn_service_start')?.({ fd: 999, requestId: 'obsolete' })
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(attachments)
+  })
+
+  it('rejects an empty include policy without starting a VPN', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    mocks.getPolicy.mockResolvedValue({ policy: { schemaVersion: 1, mode: 'include', packages: [] }, effectivePolicy: { mode: 'include', packages: [], uids: [] }, skippedPackages: [] })
+    const vpn = await loadVpnModule()
+    await expect(vpn.onNetworkInstanceChange('A')).rejects.toThrow('no_effective_apps')
+    expect(mocks.startVpn).not.toHaveBeenCalled()
+  })
+
+  it('validates before changing the running interface', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule(); await vpn.onNetworkInstanceChange('A')
+    mocks.setPolicy.mockRejectedValueOnce(new Error('no_effective_apps'))
+    await expect(vpn.applyAppRoutingPolicy({ schemaVersion: 1, mode: 'include', packages: [] })).rejects.toThrow('no_effective_apps')
+    expect(mocks.stopVpn).not.toHaveBeenCalled()
+    expect(mocks.startVpn).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not rebuild when different packages resolve to the same UID set', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    mocks.getPolicy.mockResolvedValue({ policy: { schemaVersion: 1, mode: 'include', packages: ['app.a'] }, effectivePolicy: { mode: 'include', packages: ['app.a'], uids: [10001] }, skippedPackages: [] })
+    const vpn = await loadVpnModule(); await vpn.onNetworkInstanceChange('A')
+    expect((await vpn.applyAppRoutingPolicy({ schemaVersion: 1, mode: 'include', packages: ['app.b'] })).status).toBe('applied')
+    expect(mocks.startVpn).toHaveBeenCalledTimes(1)
+    expect(mocks.stopVpn).not.toHaveBeenCalled()
+  })
+
+  it('restores the previous policy if rebuilding fails', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule(); await vpn.onNetworkInstanceChange('A')
+    mocks.startVpn.mockRejectedValueOnce(new Error('establish_failed'))
+    expect((await vpn.applyAppRoutingPolicy({ schemaVersion: 1, mode: 'include', packages: ['app.a'] })).status).toBe('restored')
+    expect((await mocks.getPolicy()).policy.mode).toBe('all')
+    expect(mocks.startVpn).toHaveBeenCalledTimes(3)
   })
 })
 

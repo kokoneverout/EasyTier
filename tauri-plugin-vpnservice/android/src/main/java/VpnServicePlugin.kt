@@ -13,6 +13,11 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import android.webkit.WebView
 import org.json.JSONArray
+import org.json.JSONObject
+import app.tauri.plugin.JSArray
+import android.os.Build
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 
 @InvokeArg
 class PingArgs {
@@ -26,7 +31,33 @@ class StartVpnArgs {
     var routes: Array<String> = emptyArray()
     var dns: String? = null
     var disallowedApplications: Array<String> = emptyArray()
+    var applicationMode: String? = null
+    var allowedApplications: Array<String> = emptyArray()
+    var requestId: String? = null
     var mtu: Int? = null
+}
+
+@InvokeArg
+class GetAppIconArgs {
+    var packageName: String? = null
+}
+
+@InvokeArg
+class AppRoutingPolicyPayload {
+    var schemaVersion: Int? = null
+    var mode: String? = null
+    var packages: Array<String> = emptyArray()
+}
+
+@InvokeArg
+class SetAppRoutingPolicyArgs {
+    var policy: AppRoutingPolicyPayload? = null
+    var validateOnly: Boolean? = null
+}
+
+@InvokeArg
+class AppRoutingPageArgs {
+    var open: Boolean = false
 }
 
 @TauriPlugin
@@ -39,6 +70,7 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private val implementation = Example()
+    private var appRoutingBackCallback: OnBackPressedCallback? = null
     private val tileActionHandler: (String) -> Boolean = { action ->
         val data = JSObject()
         data.put("action", action)
@@ -52,6 +84,11 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
             println("vpn: triggerCallback $event $data")
             trigger(event, data)
         }
+        (activity as? ComponentActivity)?.let { owner ->
+            appRoutingBackCallback = object : OnBackPressedCallback(false) {
+                override fun handleOnBackPressed() { trigger("app_routing_back", JSObject()) }
+            }.also { owner.onBackPressedDispatcher.addCallback(owner, it) }
+        }
         tileActionCallback = tileActionHandler
     }
 
@@ -59,7 +96,17 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         if (tileActionCallback === tileActionHandler) {
             tileActionCallback = { false }
         }
+        appRoutingBackCallback?.remove()
         super.onDestroy()
+    }
+
+    @Command
+    fun setAppRoutingPageOpen(invoke: Invoke) {
+        val args = invoke.parseArgs(AppRoutingPageArgs::class.java)
+        activity.runOnUiThread {
+            appRoutingBackCallback?.isEnabled = args.open
+            invoke.resolve(JSObject())
+        }
     }
 
     @Command
@@ -99,19 +146,74 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             println("start vpn in plugin, args: $args")
 
-            TauriVpnService.self?.onRevoke()
+            // Validate the app lists before tearing down the old interface, so
+            // a rejected request keeps the currently running VPN untouched.
+            val mode = args.applicationMode
+            if (mode != null && mode != AppRoutingPolicyStore.MODE_INCLUDE && mode != AppRoutingPolicyStore.MODE_ALL) {
+                invoke.reject("invalid_app_routing_mode", "invalid_app_routing_mode")
+                return@runOnUiThread
+            }
+            val allowedForService: Array<String>
+            val disallowedForService: Array<String>
+            val normalizedMode: String
+            if (mode == AppRoutingPolicyStore.MODE_INCLUDE) {
+                if (args.disallowedApplications.isNotEmpty()) {
+                    invoke.reject("conflicting_app_lists", "conflicting_app_lists")
+                    return@runOnUiThread
+                }
+                val resolution = try {
+                    AppRoutingResolver.resolveInclude(
+                        AppCatalog.getInstalledAppIdentities(activity),
+                        AppCatalog.getSelfUid(activity),
+                        args.allowedApplications.toList(),
+                    )
+                } catch (e: Exception) {
+                    invoke.reject("app_policy_check_failed: ${e.message}", "app_policy_check_failed")
+                    return@runOnUiThread
+                }
+                if (resolution.effective.packages.isEmpty()) {
+                    invoke.reject("no_effective_apps", "no_effective_apps")
+                    return@runOnUiThread
+                }
+                // The service re-resolves the persisted package list at
+                // establish time; pass the normalized selection, not the
+                // expanded uid groups.
+                allowedForService = resolution.policy.packages.toTypedArray()
+                disallowedForService = emptyArray()
+                normalizedMode = AppRoutingPolicyStore.MODE_INCLUDE
+            } else {
+                if (args.allowedApplications.isNotEmpty()) {
+                    invoke.reject("conflicting_app_lists", "conflicting_app_lists")
+                    return@runOnUiThread
+                }
+                // "all" and legacy requests without a mode share the
+                // disallowed branch; the VPN app itself is always excluded by
+                // its real package name.
+                allowedForService = emptyArray()
+                disallowedForService = (args.disallowedApplications.toList() + activity.packageName).distinct().toTypedArray()
+                normalizedMode = AppRoutingPolicyStore.MODE_ALL
+            }
+
+
 
             val it = VpnService.prepare(activity)
             val ret = JSObject()
             if (it != null) {
                 ret.put("errorMsg", "need_prepare")
             } else {
+                if (TauriVpnService.interfaceEstablished) {
+                    invoke.reject("vpn_already_running", "vpn_already_running")
+                    return@runOnUiThread
+                }
                 val intent = Intent(activity, TauriVpnService::class.java)
                 intent.putExtra(TauriVpnService.IPV4_ADDR, args.ipv4Addr)
                 intent.putExtra(TauriVpnService.IPV4_ADDRS, args.ipv4Addrs)
                 intent.putExtra(TauriVpnService.ROUTES, args.routes)
                 intent.putExtra(TauriVpnService.DNS, args.dns)
-                intent.putExtra(TauriVpnService.DISALLOWED_APPLICATIONS, args.disallowedApplications)
+                intent.putExtra(TauriVpnService.DISALLOWED_APPLICATIONS, disallowedForService)
+                intent.putExtra(TauriVpnService.APPLICATION_MODE, normalizedMode)
+                intent.putExtra(TauriVpnService.ALLOWED_APPLICATIONS, allowedForService)
+                intent.putExtra(TauriVpnService.REQUEST_ID, args.requestId)
                 intent.putExtra(TauriVpnService.MTU, args.mtu)
 
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
@@ -138,11 +240,15 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun getVpnStatus(invoke: Invoke) {
         val ret = JSObject()
-        ret.put("running", TauriVpnService.self != null)
+        ret.put("running", TauriVpnService.interfaceEstablished)
         ret.put("ipv4Addr", TauriVpnService.ipv4Addr)
         ret.put("ipv4Addrs", JSONArray(TauriVpnService.ipv4Addrs))
         ret.put("routes", JSONArray(TauriVpnService.routes))
         ret.put("dns", TauriVpnService.dns)
+        ret.put("applicationMode", TauriVpnService.applicationMode)
+        ret.put("effectivePolicy", TauriVpnService.effectivePolicy)
+        ret.put("skippedPackages", TauriVpnService.skippedPackages)
+        ret.put("lockdownEnabled", isLockdownEnabled())
         invoke.resolve(ret)
     }
 
@@ -151,5 +257,140 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
         val ret = JSObject()
         ret.put("action", EasyTierVpnTileService.consumePendingAction(activity))
         invoke.resolve(ret)
+    }
+    @Command
+    fun getInstalledApps(invoke: Invoke) {
+        runOnWorkerThread(invoke) {
+            val catalog = AppCatalog.getCatalog(activity)
+            val apps = JSArray()
+            for (app in catalog.apps) {
+                apps.put(
+                    JSObject()
+                        .put("packageName", app.packageName)
+                        .put("label", app.label)
+                        .put("uid", app.uid)
+                        .put("isSystem", app.isSystem)
+                        .put("hasLauncher", app.hasLauncher)
+                        .put("enabled", app.enabled)
+                        .put("hasInternetPermission", app.hasInternetPermission)
+                        .put("sharedUidPackages", JSArray(app.sharedUidPackages))
+                        .put("selectable", app.selectable)
+                        .apply { app.unavailableReason?.let { reason -> put("unavailableReason", reason) } }
+                        .put("iconKey", app.iconKey),
+                )
+            }
+            JSObject()
+                .put("selfPackageName", catalog.selfPackageName)
+                .put("selfUid", catalog.selfUid)
+                .put("apps", apps)
+        }
+    }
+
+    @Command
+    fun getAppIcon(invoke: Invoke) {
+        val args = invoke.parseArgs(GetAppIconArgs::class.java)
+        val packageName = args.packageName
+        if (packageName.isNullOrEmpty()) {
+            invoke.reject("package_name_required", "package_name_required")
+            return
+        }
+        runOnWorkerThread(invoke) {
+            val icon = AppCatalog.getAppIcon(activity, packageName)
+                ?: return@runOnWorkerThread JSObject().put("packageName", packageName)
+            JSObject()
+                .put("packageName", icon.packageName)
+                .put("iconKey", icon.iconKey)
+                .put("dataUrl", icon.dataUrl)
+        }
+    }
+
+    @Command
+    fun getAppRoutingPolicy(invoke: Invoke) {
+        runOnWorkerThread(invoke) {
+            val stored = AppRoutingPolicyStore.load(activity)
+            if (stored == null) {
+                JSObject()
+                    .put("policy", JSONObject.NULL)
+                    .put("skippedPackages", JSArray())
+            } else {
+                val resolution = if (stored.mode == AppRoutingPolicyStore.MODE_ALL) {
+                    AppRoutingResolver.resolveAll(stored.packages)
+                } else {
+                    AppRoutingResolver.resolveInclude(
+                        AppCatalog.getInstalledAppIdentities(activity),
+                        AppCatalog.getSelfUid(activity),
+                        stored.packages,
+                    )
+                }
+                JSObject()
+                    .put("policy", resolution.policy.toJson())
+                    .put("effectivePolicy", JSObject.fromJSONObject(AppRoutingResolver.effectiveToJson(resolution.effective)))
+                    .put("skippedPackages", JSArray.from(AppRoutingResolver.skippedToJson(resolution.skipped)))
+            }
+        }
+    }
+
+    @Command
+    fun setAppRoutingPolicy(invoke: Invoke) {
+        val args = invoke.parseArgs(SetAppRoutingPolicyArgs::class.java)
+        val payload = args.policy
+        if (payload == null) {
+            invoke.reject("policy_required", "policy_required")
+            return
+        }
+        runOnWorkerThread(invoke) {
+            val policy = AppRoutingPolicy.normalize(
+                payload.schemaVersion ?: AppRoutingPolicyStore.SCHEMA_VERSION,
+                payload.mode ?: "",
+                payload.packages.toList(),
+            )
+            val resolution = if (policy.mode == AppRoutingPolicyStore.MODE_ALL) {
+                AppRoutingResolver.resolveAll(policy.packages)
+            } else {
+                AppRoutingResolver.resolveInclude(
+                    AppCatalog.getInstalledAppIdentities(activity),
+                    AppCatalog.getSelfUid(activity),
+                    policy.packages,
+                )
+            }
+            val validateOnly = args.validateOnly == true
+            if (validateOnly && policy.mode == AppRoutingPolicyStore.MODE_INCLUDE && resolution.effective.packages.isEmpty()) {
+                throw AppRoutingPolicyException("no_effective_apps")
+            }
+            if (!validateOnly) {
+                AppRoutingPolicyStore.save(activity, resolution.policy)
+            }
+            JSObject()
+                .put("policy", resolution.policy.toJson())
+                .put("effectivePolicy", JSObject.fromJSONObject(AppRoutingResolver.effectiveToJson(resolution.effective)))
+                .put("skippedPackages", JSArray.from(AppRoutingResolver.skippedToJson(resolution.skipped)))
+        }
+    }
+
+    /**
+     * Visible only as a hint that unselected apps may lose connectivity when
+     * the system "block connections without VPN" switch is on (API 29+).
+     */
+    private fun isLockdownEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return false
+        }
+        return try {
+            TauriVpnService.self?.isLockdownEnabled ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Runs block off the main thread and resolves the invoke with the returned JSObject. */
+    private fun runOnWorkerThread(invoke: Invoke, block: () -> JSObject) {
+        Thread {
+            try {
+                invoke.resolve(block())
+            } catch (e: Exception) {
+                val message = e.message ?: e.toString()
+                invoke.reject(message, message)
+            }
+        }.start()
     }
 }

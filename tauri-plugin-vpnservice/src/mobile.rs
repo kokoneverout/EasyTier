@@ -66,4 +66,33 @@ impl<R: Runtime> Vpnservice<R> {
             .run_mobile_plugin("consume_vpn_tile_action", payload)
             .map_err(Into::into)
     }
+    pub fn get_installed_apps(&self, payload: VoidRequest) -> crate::Result<AppCatalogResponse> {
+        self.0
+            .run_mobile_plugin("get_installed_apps", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn get_app_icon(&self, payload: GetAppIconRequest) -> crate::Result<AppIconResponse> {
+        self.0
+            .run_mobile_plugin("get_app_icon", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn get_app_routing_policy(
+        &self,
+        payload: VoidRequest,
+    ) -> crate::Result<GetAppRoutingPolicyResponse> {
+        self.0
+            .run_mobile_plugin("get_app_routing_policy", payload)
+            .map_err(Into::into)
+    }
+
+    pub fn set_app_routing_policy(
+        &self,
+        payload: SetAppRoutingPolicyRequest,
+    ) -> crate::Result<AppRoutingPolicyResult> {
+        self.0
+            .run_mobile_plugin("set_app_routing_policy", payload)
+            .map_err(Into::into)
+    }
 }

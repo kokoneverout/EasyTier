@@ -45,6 +45,84 @@ Denies the consume_vpn_tile_action command without any pre-configured scope.
 <tr>
 <td>
 
+`vpnservice:allow-get-app-icon`
+
+</td>
+<td>
+
+Enables the get_app_icon command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-get-app-icon`
+
+</td>
+<td>
+
+Denies the get_app_icon command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-get-app-routing-policy`
+
+</td>
+<td>
+
+Enables the get_app_routing_policy command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-get-app-routing-policy`
+
+</td>
+<td>
+
+Denies the get_app_routing_policy command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-get-installed-apps`
+
+</td>
+<td>
+
+Enables the get_installed_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-get-installed-apps`
+
+</td>
+<td>
+
+Denies the get_installed_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vpnservice:allow-get-vpn-status`
 
 </td>
@@ -168,6 +246,58 @@ Enables the register_listener command without any pre-configured scope.
 <td>
 
 Denies the register_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-set-app-routing-page-open`
+
+</td>
+<td>
+
+Enables the set_app_routing_page_open command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-set-app-routing-page-open`
+
+</td>
+<td>
+
+Denies the set_app_routing_page_open command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:allow-set-app-routing-policy`
+
+</td>
+<td>
+
+Enables the set_app_routing_policy command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-set-app-routing-policy`
+
+</td>
+<td>
+
+Denies the set_app_routing_policy command without any pre-configured scope.
 
 </td>
 </tr>
