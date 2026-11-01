@@ -1,67 +1,80 @@
 # 上游并轨记录
 
-## 基线
+## 基线与源码
 
-- 上游：`24e0303fc55e4e645a11818954dd5b712fb94510`，2026-11-01 执行 `git fetch origin main --tags` 后确认。
-- 分支：`codex/upstream-alignment`，直接建立在该上游提交上。
-- 旧定制对照：`6a55ed55`，程序源码与 `6eb47b7b` 相同；旧分支保留。
-- 原工作目录的未提交修改没有整批搬入，运行设备没有更换。
+- 上游基线：24e0303fc55e4e645a11818954dd5b712fb94510，2026-11-01 重新获取 main 后固定。
+- 分支：codex/upstream-alignment，直接从该上游提交建立。
+- 旧对照：6a55ed55，程序源码与 6eb47b7b 相同，旧分支保留。
+- 原工作目录中的私有配置、运维记录和未提交源码没有整体搬入。生产设备尚未切换。
 
-## 迁移清单
+## 定制清单
 
-| 能力 | 上游入口与判断 | 本分支处理 |
+| 能力 | 采用的上游入口 | 保留内容及删除条件 |
 | --- | --- | --- |
-| IPv6 地址、双栈出口节点 | `easytier-core/src/config/toml.rs` 已有 `get_ipv6`、`get_exit_nodes`；出口接受 `IpAddr` | 复用上游，仅补管理 API 的静态 IPv6 地址往返 |
-| IPv6 手动路由、显式出口 DNS | 上游 TOML 与管理 API 缺少旧定制的 `routes_v6`、`vpn_dns` | 已迁移配置读写、CLI、管理 API 和前端序列化；实际路由/DNS 安装待迁移 |
-| Android 启停与 FD 挂接 | `mobile_vpn.ts`、`instance/factory/mobile_tun.rs` 已有队列、等待重试、共享 TUN 与挂接完成确认 | 采用上游架构，未覆盖旧协调器；分应用策略仍待接入 |
-| Android 分应用与共享 UID | 上游插件已有 `disallowedApplications`，完整策略尚未覆盖 | 待迁移策略存储、UID 解析及选择入口 |
-| 物理出口与控制 DNS | 上游已有 `socket` 和上下文 DNS，入口与旧版本不同 | 正在核对真实出口、TUN 排除与失败行为，尚未迁入旧 underlay 实现 |
-| Windows DNS/NRPT 与生命周期 | 上游已改为共享 NIC/运行时 host | 待迁移，须适配新的资源所有权，不能整文件覆盖旧生命周期 |
-| 历史上游回移补丁 | 新上游中相关模块已重组；`tunnel/quic.rs` 已含 ETQ1、packet-number checksum 和旧版本协商 | 不重复迁入 ETQ1 旧补丁；其余逐项核对，保留混合版本验证任务 |
-| 私有分流与运维资料 | 独立运维层 | 没有加入公开源码分支 |
+| 双栈地址、出口选择与转发 | easytier-core 配置、peer manager | 复用上游，只补管理 API 静态 IPv6 往返；上游覆盖同一字段后可删 |
+| IPv6 手动路由、显式 VPN DNS | TOML、CLI、管理 API、GUI、runtime services | 补字段与转换，IPv6 模式独立于 IPv4并保留显式空列表；等价语义进入上游后可删 |
+| 路由安装与维护 | CorePacketPlane、NicCtx、共享 NIC claims | 接入手动 IPv6 路由、手动 cost、失败重试和消失路由恢复；两类 NIC 均获上游覆盖后可删 |
+| 物理出口 | NativeInstanceHost、原有 TCP/UDP factory | 实例级适配，排除 TUN，覆盖 STUN/打洞控制 socket，源不可用则报错；上游支持同等实例策略后可删 |
+| 控制 DNS | request-scoped resolver | 查询时读当前物理 DNS、过滤 VPN DNS，优先物理网络服务器；复用 UDP/TCP 与超时，上游覆盖后可删 |
+| Windows VPN DNS/NRPT | WindowsDNSManager、NicCtx 生命周期 | 单一所有者、失败与停止清理、缓存刷新；显式 DNS 与 Magic DNS 互斥；上游支持等价所有权后可删 |
+| Android 分应用 | 上游插件、VpnService、共享 TUN | 包名存储、UID/共享 UID、自身排除、卸载处理、选择页；上游产品功能覆盖后可删 |
+| Android 启停 | mobile_vpn.ts 单一队列 | 接入策略、请求 ID、原生错误与按 UID 重建；失败恢复一次，用户停止优先；上游协调器覆盖后可删 |
+| 签名与产物 | 上游工具链、Gradle、mobile workflow | 外部文件/secrets 签名入口、证书和产物哈希核验；不在源码中保存签名材料 |
 
-## 配置迁移的兼容约定
+没有搬回旧 virtual_nic、manual connector、打洞实现、全局 underlay resolver 或整套移动协调器。ETQ1、packet-number checksum、旧版本协商及连接恢复直接采用新上游。旧定制中强制所有控制 DNS 走 TCP、固定 700ms/一次尝试的策略不再保留。
 
-- 保留旧 TOML/JSON 字段名 `routes_v6`、`virtual_ipv6`、`vpn_dns`。
-- 旧定制 protobuf 的 67–69 已被上游用于 `socket_mark`、`peers`、`vpn_portal_config`，不能复用。新字段使用 77–80，原有上游编号保持不变。
-- 旧配置通过 TOML/JSON 导入；不承诺旧定制管理客户端与新管理服务之间的二进制 RPC 兼容。节点传输兼容另行验证。
-- IPv6 手动模式独立于 IPv4。旧 JSON 的非空列表继续启用 IPv6 手动模式；新增可选 `enable_manual_routes_v6` 使显式空列表也能无损往返。未指定时保留旧行为。
-- `vpn_dns` 在配置边界验证为 IPv4/IPv6 地址，不接受域名或带端口字符串。
-- 使用上游 protobuf 代码生成流程；不手工维护生成的前端协议类型。
+应用选择页面与 UID 策略仍是需要的功能。本轮保留现有页面，没有把页面拆分、图标队列重构或私有 YAML 模板改造作为迁移前置条件。Mihomo 分流和私有部署层继续独立维护。
 
-## 已执行验证
+## 兼容约定
 
-- 无定制上游 Windows/Linux 核心 `cargo check --locked -p easytier --bins --features aes-gcm,mimalloc` 通过。Linux 使用本机 WSL。
-- 上游移动 VPN 测试 40 项通过；Windows 下测试脚本的通配符不展开，已改为明确的两个文件名。
-- 上游 GUI 前端构建通过。需先构建插件 JS，避免使用旧分支留下的声明产物。
-- 配置迁移前，两个前端回归均失败，确认旧字段会被新上游序列化丢弃。
-- 迁移后，前端全部 57 项测试通过，包括新增的字段往返、独立 IPv6 模式与 protobuf 编解码回归。
-- 配置迁移后的 Windows 核心编译检查通过。
-- Rust 配置与配置归一化回归 96 项全部通过，含 TOML、两条 API 投影、浏览器合并/清空、无效输入和 IPv4/IPv6 独立模式。
-- 迁移后 GUI 前端构建通过。
-- 无定制上游 Android ARM64 Rust 编译检查通过；`custom-protocol` 检查复用了已构建前端资产作为 Tauri 嵌入输入，没有构建或签名 APK。
-- 迁移后的 Android ARM64 Rust 编译检查通过。
-- CLI 新参数回归通过，验证参数解析、覆盖、无参数时保留旧配置和非法输入拒绝。
+- 保留 routes_v6、virtual_ipv6、vpn_dns 的 TOML/JSON 名称。
+- 旧定制 protobuf 的 67–69 与新上游 socket_mark、peers、vpn_portal_config 冲突，新增字段采用 77–80。旧配置通过 TOML/JSON 导入；旧管理二进制不能直接操作新服务。
+- IPv6 手动模式独立于 IPv4。旧 JSON 非空列表仍推断为启用；enable_manual_routes_v6 可保留显式空列表。
+- DNS 在配置边界验证为 IPv4/IPv6 地址。前端协议类型按上游流程生成。
+- Android 保留 com.kkrainbow.easytier、原有策略 SharedPreferences 名称与 schema 1。首次启动就完成策略初始化，旧安装无策略时保留全应用行为，新安装使用空选择，已有策略不覆盖。
+- Android ARM64 APK 的证书 SHA256 与旧安装包一致：589080507c25cc5f136f489ada340bce870df8c97db73c0691ec2a1f2eb9fecc。
 
-Windows 首次基线检查因 7-Zip 不在进程 PATH 中失败，补充现有工具路径后通过；Android 首次因桌面 clang 抢先于 NDK clang 而失败，已修正本轮进程 PATH 后重试。这些是构建环境处理，没有改全局设置或上游网络实现。
+## 提交
 
-基线快照与迁移源码切换时，应使用独立 Cargo target 目录，或清除对应本地工作区包的缓存后再检查，避免同名同版本包留下旧元数据。Linux 源码和 target 放在持久缓存目录，不能放在会随 WSL 退出清空的 `/tmp`。
+- 06038d79：Windows 下移动测试命令。
+- 82aa6598：配置、CLI、管理 API 与序列化。
+- 9d45bd7b：host/socket、双栈路由、DNS 生命周期适配。
+- ed50d99c：分应用接入上游生命周期与配置 UI。
+- afcdc742：签名材料移出源码。
+- 40353f87：可重复的隔离网络回归与上游 CI 签名适配。
+- 22690d25：安装/升级策略初始化顺序及回归。
+- 3b05ec6f：显式源地址的 STUN/打洞 socket 也绑定物理设备，增加隔离行为回归。
+- 9f40a381：核对实际策略后才向界面报告应用成功。
 
-可复现验证入口：
+候选核心 CI 使用上游 prepare-build，独立验证 Windows/Linux，并记录源码、构建选项与哈希。当前 GitHub API 拒绝启动 Actions（返回仓库 Actions 已禁用，尽管仓库权限接口显示 enabled）；本轮不计作已运行验证，继续本地构建。
 
-```text
-cargo check --locked -p easytier --bins --features aes-gcm,mimalloc
-cargo check --locked --lib --target aarch64-linux-android -p easytier-gui --features custom-protocol
-cargo test --locked -p easytier-core --lib --features browser-config config::
-cargo test --locked -p easytier --lib --features aes-gcm,mimalloc core::tests::custom_dualstack
-pnpm --filter easytier-frontend-lib test:config-ui
-pnpm --filter easytier-gui test:mobile-vpn
-pnpm --filter tauri-plugin-vpnservice-api build
-pnpm --filter easytier-gui build
-```
+## 验证
 
-使用项目指定 Rust 1.95、protoc 和 Android NDK；NDK clang 必须在目标构建的 PATH 中先于桌面 clang。上述检查不启动 VPN 实例，不更改系统网络。
+已通过：配置与归一化 Rust 96 项、CLI 1 项、前端 57 项、移动协调器/策略初始化 51 项、Android 原生策略 11 项。核心运行时首轮选定测试 11 项通过；最终核心回归随发布构建复核。
+
+隔离 WSL 中，新旧发布程序的 TCP、QUIC 双向连接通过。独立网络/挂载命名空间内，双栈 TUN 数据、默认路由接管后的物理传输、IPv4/IPv6 路由补回、STUN、UDP DNS 和 DNS TCP 回退均通过。未接入生产网络，未改变宿主路由或 DNS。
+
+复验入口：
+
+    cargo test --locked -p easytier-core --lib --features browser-config config::
+    cargo test --locked -p easytier --lib --features aes-gcm,mimalloc core::tests::custom_dualstack
+    pnpm --filter easytier-frontend-lib test:config-ui
+    pnpm --filter easytier-gui test:mobile-vpn
+    pnpm --filter tauri-plugin-vpnservice-api build
+    pnpm --filter easytier-gui build
+
+Android 工程生成后，在 gen/android 下运行：
+
+    ./gradlew :tauri-plugin-vpnservice:testDebugUnitTest --no-daemon
+
+Linux，两个目录均需包含 core 与 cli：
+
+    sudo bash scripts/upstream-alignment/network-smoke.sh OLD_BIN_DIR NEW_BIN_DIR OUTPUT_DIR
+
+采用 Rust 1.95、protoc 35.1、Android NDK 26。NDK clang 在 Android 构建 PATH 中先于桌面 clang。大型 Rust 构建逐个平台执行，避免本机内存不足。Linux 源码/缓存放持久目录，不使用随 WSL 退出清空的 /tmp；中断导致增量缓存异常时，清理对应工作区包或关闭增量编译。
 
 ## 发布状态
 
-当前仅完成并轨基础和配置迁移，尚不能作为现行定制程序的替代产物。下一步是将路由、出口绑定和 DNS 的实际行为接到新架构，再接入 Android 分应用功能，随后构建、跨端验证和分批发布。
+源码迁移已完成，功能源码冻结于 9f40a381。Windows 首轮发布构建成功；首个签名 ARM64 APK 已生成并核对证书。冻结源码后的重打包、Linux 发布构建与最终核心复核仍在进行，当前没有将候选程序替换到生产设备。
+
+本地检查不等同于 Windows 实际 NRPT 切换或 Android 实机后台/升级验收。真实切换保留现行程序与配置，先准备独立五分钟自动回退，再逐设备验证；当前 Windows 连接放在最后。
