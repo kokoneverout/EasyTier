@@ -57,16 +57,17 @@ android {
     }
     signingConfigs {
         create("release") {
-            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystorePropertiesFile = System.getenv("EASYTIER_ANDROID_KEYSTORE_PROPERTIES")?.let(::file)
+                ?: rootProject.file("keystore.properties")
             val keystoreProperties = Properties()
             if (keystorePropertiesFile.exists()) {
                 keystoreProperties.load(FileInputStream(keystorePropertiesFile))
             }
 
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["keyPassword"] as String
-            storeFile = file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["storePassword"] as String
+            keyAlias = keystoreProperties.getProperty("keyAlias")
+            keyPassword = keystoreProperties.getProperty("keyPassword")
+            storeFile = (System.getenv("EASYTIER_ANDROID_KEYSTORE_PATH") ?: keystoreProperties.getProperty("storeFile"))?.let(::file)
+            storePassword = keystoreProperties.getProperty("storePassword")
         }
     }
     buildTypes {

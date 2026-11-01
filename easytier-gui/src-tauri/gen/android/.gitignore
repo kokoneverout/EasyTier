@@ -1,5 +1,6 @@
 *.iml
 .gradle
+.kotlin
 /local.properties
 /.idea/caches
 /.idea/libraries
@@ -14,6 +15,9 @@ build
 .cxx
 local.properties
 key.properties
+keystore.properties
+*.jks
+*.keystore
 
 /.tauri
 /tauri.settings.gradle

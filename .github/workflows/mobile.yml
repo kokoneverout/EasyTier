@@ -125,6 +125,22 @@ jobs:
         if: needs.pre_job.outputs.full_build != 'true'
         run: cargo check --locked --lib --target "$TARGET" --package easytier-gui --features custom-protocol
 
+      - name: Restore private Android signing files
+        if: needs.pre_job.outputs.full_build == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PROPERTIES" || {
+            echo '::error::Configure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PROPERTIES.'
+            exit 1
+          }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/easytier-android.jks"
+          printf '%s' "$KEYSTORE_PROPERTIES" > "$RUNNER_TEMP/easytier-android.properties"
+          echo "EASYTIER_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/easytier-android.jks" >> "$GITHUB_ENV"
+          echo "EASYTIER_ANDROID_KEYSTORE_PROPERTIES=$RUNNER_TEMP/easytier-android.properties" >> "$GITHUB_ENV"
+
       - name: Build
         if: needs.pre_job.outputs.full_build == 'true'
         run: |
@@ -145,6 +161,14 @@ jobs:
 
           mv ./artifacts/objects/* ./artifacts/
           rm -rf ./artifacts/objects/
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs ./artifacts/*.apk
+          printf 'Commit: %s\nTarget: %s\n' "$GITHUB_SHA" "$TARGET" > ./artifacts/BUILD.txt
+          (cd artifacts && sha256sum *.apk > SHA256SUMS.txt)
+
+      - name: Remove private Android signing files
+        if: always() && needs.pre_job.outputs.full_build == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/easytier-android.jks" "$RUNNER_TEMP/easytier-android.properties"
 
       - name: Archive artifact
         if: needs.pre_job.outputs.full_build == 'true'
