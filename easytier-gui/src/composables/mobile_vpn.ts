@@ -579,6 +579,7 @@ async function findRunningTunInstances() {
 
 export async function initMobileVpnService() {
   await registerVpnServiceListener()
+  await ensureAppRoutingPolicyInitialized()
 }
 
 export async function prepareVpnService(instanceId: string) {
