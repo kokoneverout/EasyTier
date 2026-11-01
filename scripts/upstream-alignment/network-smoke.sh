@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: sudo bash network-smoke.sh OLD_BIN_DIR NEW_BIN_DIR OUTPUT_DIR
+# Usage: sudo bash network-smoke.sh OLD_BIN_DIR NEW_BIN_DIR OUTPUT_DIR [NATIVE_TEST_BINARY]
 # Requires Linux, iproute2, util-linux, ping, Python 3 and /dev/net/tun.
 set -euo pipefail
 old=$(realpath "${1:?old binary directory required}")
@@ -7,13 +7,14 @@ new=$(realpath "${2:?candidate binary directory required}")
 mkdir -p "${3:?output directory required}"
 out=$(realpath "$3")
 server=$(realpath "$(dirname "$0")/control_server.py")
+native_tests=${4:+$(realpath "$4")}
 for dir in "$old" "$new"; do
   test -x "$dir/easytier-core" && test -x "$dir/easytier-cli"
 done
 # Every network and resolver mutation is confined to these new namespaces.
-exec unshare --mount --net bash -s -- "$old" "$new" "$out" "$server" <<'ISOLATED'
+exec unshare --mount --net bash -s -- "$old" "$new" "$out" "$server" "$native_tests" <<'ISOLATED'
 set -euo pipefail
-old=$1 new=$2 out=$3 server=$4
+old=$1 new=$2 out=$3 server=$4 native_tests=$5
 mount --make-rprivate /
 ip link set lo up
 unshare --net sleep 600 &
@@ -72,6 +73,9 @@ for proto in tcp quic; do
   grep -q 'dev newtun' "$out/$proto-transport-route.txt"
   "$new/easytier-cli" -p 127.0.0.1:31336 -o json peer >"$out/$proto-peer.json"
   echo "PASS $proto dual-stack payload with defaults captured by VPN"
+  if [[ -n $native_tests ]]; then
+    "$native_tests" instance::host::tests::explicit_control_source_bypasses_captured_default --exact --ignored
+  fi
   ip route del 128.0.0.0/1 dev newtun
   ip -6 route del 8000::/1 dev newtun
   healed=false

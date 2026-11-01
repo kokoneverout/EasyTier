@@ -74,32 +74,39 @@ impl easytier_core::socket::udp::VirtualUdpSocketFactory for NativeInstanceSocke
         if self.physical()
             && options.need_protect
             && options.purpose != UdpSocketPurpose::PortBoundListener
-            && options
+        {
+            if options
                 .local_addr
                 .is_none_or(|addr| addr.ip().is_unspecified())
-        {
-            let remote = options.local_addr.unwrap_or_else(|| {
-                std::net::SocketAddr::new(
-                    if options.context.ip_version == IpVersion::V6 {
-                        std::net::Ipv6Addr::UNSPECIFIED.into()
-                    } else {
-                        std::net::Ipv4Addr::UNSPECIFIED.into()
-                    },
-                    0,
-                )
-            });
-            let mut source =
-                crate::common::underlay::source(self.global_ctx.net_ns.clone(), remote).await?;
-            source.set_port(remote.port());
-            options.local_addr = Some(source);
-            options.bind_device = Some(
-                self.global_ctx
-                    .net_ns
-                    .run(|| crate::tunnel::common::get_interface_name_by_ip(&source.ip()))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("physical interface disappeared during socket creation")
-                    })?,
-            );
+            {
+                let remote = options.local_addr.unwrap_or_else(|| {
+                    std::net::SocketAddr::new(
+                        if options.context.ip_version == IpVersion::V6 {
+                            std::net::Ipv6Addr::UNSPECIFIED.into()
+                        } else {
+                            std::net::Ipv4Addr::UNSPECIFIED.into()
+                        },
+                        0,
+                    )
+                });
+                let mut source =
+                    crate::common::underlay::source(self.global_ctx.net_ns.clone(), remote).await?;
+                source.set_port(remote.port());
+                options.local_addr = Some(source);
+            }
+            // STUN and hole-punch factories do not auto-bind a device. Apply
+            // the policy even when the portable layer already chose an IP.
+            if options.bind_device.is_none() {
+                let source = options.local_addr.expect("physical source selected above");
+                options.bind_device = Some(
+                    self.global_ctx
+                        .net_ns
+                        .run(|| crate::tunnel::common::get_interface_name_by_ip(&source.ip()))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("physical interface disappeared during socket creation")
+                        })?,
+                );
+            }
         }
         self.runtime.bind_udp(options).await
     }
@@ -190,5 +197,52 @@ impl ConnectorEnvironment for NativeInstanceEnvironment {
     fn is_local_ip(&self, ip: &IpAddr) -> bool {
         self.global_ctx.is_ip_local_virtual_ip(ip)
             || self.runtime.is_local_ip(ip, &self.socket_context)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use easytier_core::socket::udp::{UdpBindOptions, VirtualUdpSocket, VirtualUdpSocketFactory};
+
+    #[tokio::test]
+    #[ignore = "run through scripts/upstream-alignment/network-smoke.sh in its isolated namespace"]
+    async fn explicit_control_source_bypasses_captured_default() {
+        let route = std::process::Command::new("ip")
+            .args(["route", "get", "198.51.100.2"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&route.stdout).contains("dev newtun"));
+        let host = NativeInstanceSockets {
+            runtime: native_host_runtime(),
+            global_ctx: crate::common::global_ctx::tests::get_mock_global_ctx(),
+        };
+        assert!(host.physical());
+        for options in [
+            UdpBindOptions::stun_probe(),
+            UdpBindOptions::hole_punch_candidate(),
+        ] {
+            let socket = host
+                .bind_udp(options.with_local_addr(Some("192.0.2.1:0".parse().unwrap())))
+                .await
+                .unwrap();
+            let mut request = [0u8; 20];
+            request[1] = 1;
+            request[4..8].copy_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+            socket
+                .send_to(&request, "198.51.100.2:3478".parse().unwrap())
+                .await
+                .unwrap();
+            let mut response = [0u8; 64];
+            let (length, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                socket.recv_from(&mut response),
+            )
+            .await
+            .expect("control traffic entered the VPN instead of physical0")
+            .unwrap();
+            assert!(length >= 20);
+            assert_eq!(&response[4..20], &request[4..20]);
+        }
     }
 }
