@@ -20,10 +20,21 @@
 | Android 分应用 | 上游插件、VpnService、共享 TUN | 包名存储、UID/共享 UID、自身排除、卸载处理、选择页；上游产品功能覆盖后可删 |
 | Android 启停 | mobile_vpn.ts 单一队列 | 接入策略、请求 ID、原生错误与按 UID 重建；失败恢复一次，用户停止优先；上游协调器覆盖后可删 |
 | 签名与产物 | 上游工具链、Gradle、mobile workflow | 外部文件/secrets 签名入口、证书和产物哈希核验；不在源码中保存签名材料 |
+| QUIC 多地址监听 | Quinn、上游 UDP session 与 send metadata | 继续传递 Quinn 选定的源地址，包括拆分的 GSO 报文；上游补齐同一传递链后可删 |
 
 没有搬回旧 virtual_nic、manual connector、打洞实现、全局 underlay resolver 或整套移动协调器。ETQ1、packet-number checksum、旧版本协商及连接恢复直接采用新上游。旧定制中强制所有控制 DNS 走 TCP、固定 700ms/一次尝试的策略不再保留。
 
 应用选择页面与 UID 策略仍是需要的功能。本轮保留现有页面，没有把页面拆分、图标队列重构或私有 YAML 模板改造作为迁移前置条件。Mihomo 分流和私有部署层继续独立维护。
+
+相对上游 24e0303f，按功能源码 dadedb71 统计（行数含测试、权限生成文件，二进制不计行数）：
+
+| 范围 | 文件数 | 新增行 | 删除行 |
+| --- | ---: | ---: | ---: |
+| 程序与测试 | 66 | 4285 | 128 |
+| 隔离验证脚本 | 2 | 180 | 0 |
+| CI 与 pnpm 构建配置 | 18 | 265 | 2122 |
+
+程序范围包括删除一份上游示例签名二进制。差异主要集中于 Android 分应用页面/策略、Windows DNS 和必要的 host/socket 适配。后续合并重点检查这三处与配置/API 字段，QUIC 发送元数据修复可在上游覆盖后整体删除。此统计比较的是新上游底座，不与旧 2.6.4 底座的行数直接换算删减比例。
 
 ## 兼容约定
 
@@ -45,20 +56,23 @@
 - 22690d25：安装/升级策略初始化顺序及回归。
 - 3b05ec6f：显式源地址的 STUN/打洞 socket 也绑定物理设备，增加隔离行为回归。
 - 9f40a381：核对实际策略后才向界面报告应用成功。
+- dadedb71：补齐 QUIC 到 UDP session 的发送源地址传递，增加分层回归测试。
 
-GitHub Actions 仅保留 custom-build.yml：前端验证、Windows/Linux 核心及 Android ARM64 签名 APK。删除另外 13 套继承工作流、Docker 构建文件和不再使用的 pnpm/WASM 配置；仅保留 Rust 与前端两个准备动作。仓库里原来启用的 8 个继承工作流已禁用，避免默认分支继续额外触发。
+GitHub Actions 仅保留 custom-build.yml：前端验证、Windows/Linux 核心及 Android ARM64 签名 APK。删除另外 13 套继承工作流、Docker 构建文件和不再使用的 pnpm/WASM 配置；仅保留 Rust 与前端两个准备动作。仓库里原来启用的 8 个继承工作流已禁用。默认分支 codex/dual-stack-exit 也已通过 f8bb7fe0 删除继承工作流，仅保留适配旧源码的 custom-build.yml；该提交没有改动旧程序。
 
 用户已重新启用 Actions，并明确要求停止在其电脑上构建。本机编译进程已停止，后续测试与发布构建全部交给 GitHub Actions。
 
 ## 验证
 
-已通过：配置与归一化 Rust 96 项、CLI 1 项、前端 57 项、移动协调器/策略初始化 51 项、Android 原生策略 11 项。核心运行时首轮选定测试 11 项通过；最终核心回归随发布构建复核。
+最终云端 41293894238 全部通过：前端 57 项、移动协调器/策略初始化 51 项；Windows 配置与 UDP metadata 97 项、运行时 27 项；Linux 配置与 UDP metadata 97 项、运行时 25 项，包括 QUIC 源地址/GSO 回归；Android 原生策略 11 项。Windows 运行时有 1 项需要特权网络环境的测试保持 ignored，Linux 在下面的隔离场景中显式运行它。
 
-隔离 WSL 中，新旧发布程序的 TCP、QUIC 双向连接通过。独立网络/挂载命名空间内，双栈 TUN 数据、默认路由接管后的物理传输、IPv4/IPv6 路由补回、STUN、UDP DNS 和 DNS TCP 回退均通过。未接入生产网络，未改变宿主路由或 DNS。
+三端 release 均成功。Linux 隔离网络测试全部通过：TCP 和 QUIC 双栈数据、接管默认路由后的物理传输、IPv4/IPv6 路由恢复、STUN、UDP DNS 和 DNS TCP 回退；显式控制源地址测试在两种传输下各通过一次。
+
+历史验证：CLI 1 项通过；隔离 WSL 中，新旧发布程序的 TCP、QUIC 双向连接通过。未接入生产网络，未改变宿主路由或 DNS。停止本机构建后，新增修复仅在云端编译和测试。
 
 复验入口：
 
-    cargo test --locked -p easytier-core --lib --features browser-config config::
+    cargo test --locked -p easytier-core --lib --features browser-config -- config:: socket::udp::tests::udp_session_preserves_send_metadata
     cargo test --locked -p easytier --lib --features aes-gcm,mimalloc core::tests::custom_dualstack
     pnpm --filter easytier-frontend-lib test:config-ui
     pnpm --filter easytier-gui test:mobile-vpn
@@ -73,10 +87,22 @@ Linux，两个目录均需包含 core 与 cli：
 
     sudo bash scripts/upstream-alignment/network-smoke.sh OLD_BIN_DIR NEW_BIN_DIR OUTPUT_DIR
 
+云端传入同一个候选程序目录，验证新对新连接；可选第四个参数为 native Rust test binary，在默认路由已被接管时运行显式控制源绑定测试。
+
 采用 Rust 1.95、protoc 35.1、Android NDK 26。NDK clang 在 Android 构建 PATH 中先于桌面 clang。三端使用独立的云端 runner，产物记录提交、构建选项和 SHA256。Android 使用已通过测试的前端资产及原有仓库签名 secrets，证书不匹配则拒绝交付。
 
 ## 发布状态
 
-源码迁移已完成，功能源码冻结于 9f40a381。Windows 首轮本地发布构建成功；首个本地签名 ARM64 APK 已生成并核对证书。上述历史产物不作为本轮最终升级包，最终交付采用同一次云端流程生成的三端产物。当前没有将候选程序替换到生产设备。
+首轮云端流程 41290764228 的前端、Windows 和 Android 任务通过。Linux 隔离网络测试发现新上游 QUIC 会话层丢弃发送源地址：连接监听端的第二个地址时，回包可能改用第一个地址。dadedb71（完整提交 dadedb7161f72dcc3a4acee9b73c3ed038962c3a）补齐现有元数据的传递，不改变协议。修复已在 [41293894238](https://github.com/kokoneverout/EasyTier/actions/runs/41293894238) 完成三端重新构建和验证。
+
+最终三端产物均来自 dadedb7161f72dcc3a4acee9b73c3ed038962c3a，已下载并逐文件核对 BUILD.txt 与 SHA256SUMS.txt，共 12 项文件校验通过；Android 签名证书与现行安装一致。产物含提交号、构建参数及校验清单，GitHub 保留至 2026-11-15：
+
+| 产物 | 下载 |
+| --- | --- |
+| Windows x86_64 core、CLI 与运行库/驱动 | [Windows](https://github.com/kokoneverout/EasyTier/actions/runs/41293894238/artifacts/13078609427) |
+| Linux x86_64 musl core 与 CLI | [Linux](https://github.com/kokoneverout/EasyTier/actions/runs/41293894238/artifacts/13078733109) |
+| Android ARM64 签名 APK | [Android](https://github.com/kokoneverout/EasyTier/actions/runs/41293894238/artifacts/13077944127) |
+
+历史本地产物及首轮云端产物均不作为最终升级包，当前没有将候选程序替换到生产设备。
 
 本地检查不等同于 Windows 实际 NRPT 切换或 Android 实机后台/升级验收。真实切换保留现行程序与配置，先准备独立五分钟自动回退，再逐设备验证；当前 Windows 连接放在最后。
