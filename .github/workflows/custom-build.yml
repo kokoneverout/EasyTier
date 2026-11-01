@@ -57,7 +57,7 @@ jobs:
           shared-key: alignment-core-${{ env.TARGET }}
           cache-on-failure: true
       - name: Configuration regression
-        run: cargo test --locked -p easytier-core --lib --no-default-features --features browser-config config::
+        run: cargo test --locked -p easytier-core --lib --features browser-config config::
       - name: Runtime regression
         run: >-
           cargo test --locked -p easytier --lib --features aes-gcm,mimalloc --
