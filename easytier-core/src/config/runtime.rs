@@ -25,6 +25,8 @@ pub struct CoreRuntimeConfig {
     pub gateway: GatewayRuntimeConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_routes: Option<BTreeSet<Ipv4Cidr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_routes_v6: Option<BTreeSet<Ipv6Cidr>>,
     pub proxy: ProxyRuntimeConfig,
     #[serde(default)]
     pub public_ipv6_auto: bool,
@@ -41,6 +43,7 @@ impl Default for CoreRuntimeConfig {
             dhcp_ipv6_cidr: None,
             gateway: GatewayRuntimeConfig::default(),
             manual_routes: None,
+            manual_routes_v6: None,
             proxy: ProxyRuntimeConfig::default(),
             public_ipv6_auto: false,
             public_ipv6_provider: PublicIpv6ProviderConfig {

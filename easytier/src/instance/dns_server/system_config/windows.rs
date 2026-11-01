@@ -8,6 +8,17 @@ use crate::common::ifcfg::RegistryManager;
 
 use super::{OSConfig, SystemConfig};
 
+pub(crate) fn flush_dns() -> io::Result<()> {
+    #[link(name = "dnsapi")]
+    unsafe extern "system" {
+        fn DnsFlushResolverCache() -> i32;
+    }
+    if unsafe { DnsFlushResolverCache() } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub fn is_windows_10_or_better() -> io::Result<bool> {
     let hklm = winreg::enums::HKEY_LOCAL_MACHINE;
     let key_path = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";

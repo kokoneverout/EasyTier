@@ -63,7 +63,7 @@ fn collect_interface_states() -> HashMap<String, InterfaceState> {
     HashMap::new()
 }
 
-#[cfg(any(target_os = "freebsd", target_os = "windows"))]
+#[cfg(target_os = "freebsd")]
 fn has_nonzero_mac(iface: &NetworkInterface) -> bool {
     iface.mac_addr.as_deref().is_some_and(|mac| {
         let mut octets = mac.split([':', '-']);
@@ -259,7 +259,7 @@ impl InterfaceFilter {
                 .iter()
                 .map(|ip| ip.ip())
                 .any(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
-            && has_nonzero_mac(&self.iface)
+            && super::underlay::physical_interface(self.iface.index)
     }
 }
 
@@ -481,7 +481,7 @@ async fn collect_local_ip_addrs_in_current_namespace() -> GetIpListResponse {
         }
     }
 
-    let ifaces = collect_interfaces_in_current_namespace(false).await;
+    let ifaces = collect_interfaces_in_current_namespace(true).await;
     for iface in ifaces {
         for ip in iface.addr {
             let ip: std::net::IpAddr = ip.ip();
@@ -491,20 +491,6 @@ async fn collect_local_ip_addrs_in_current_namespace() -> GetIpListResponse {
                 }
                 ret.interface_ipv6s.push(v6.into());
             }
-        }
-    }
-
-    if let Ok(v4_addr) = local_ipv4().await {
-        tracing::trace!("got local ipv4: {}", v4_addr);
-        if !ret.interface_ipv4s.contains(&v4_addr.into()) {
-            ret.interface_ipv4s.push(v4_addr.into());
-        }
-    }
-
-    if let Ok(v6_addr) = local_ipv6().await {
-        tracing::trace!("got local ipv6: {}", v6_addr);
-        if !ret.interface_ipv6s.contains(&v6_addr.into()) {
-            ret.interface_ipv6s.push(v6_addr.into());
         }
     }
 

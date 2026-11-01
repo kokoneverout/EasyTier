@@ -13,6 +13,7 @@ pub mod log;
 pub mod machine_id;
 pub mod netns;
 pub mod network;
+pub(crate) mod underlay;
 #[cfg(feature = "management")]
 pub mod os_info;
 pub mod stun;

@@ -9,7 +9,7 @@ use std::{
 };
 use windows::Win32::NetworkManagement::IpHelper::INTERNAL_IF_OPER_STATUS;
 use windows::Win32::{
-    Foundation::{ERROR_NOT_FOUND, NO_ERROR},
+    Foundation::{ERROR_ALREADY_EXISTS, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR},
     NetworkManagement::IpHelper::{GetIfEntry, MIB_IFROW, SetIfEntry},
     System::Diagnostics::Debug::{
         FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
@@ -30,6 +30,13 @@ fn ignore_removed_not_found(result: Result<(), u32>) -> Result<(), u32> {
         Err(error) if error == ERROR_NOT_FOUND.0 => Ok(()),
         other => other,
     }
+}
+
+fn route_add_error(error: u32) -> Error {
+    if error == ERROR_ALREADY_EXISTS.0 || error == ERROR_OBJECT_ALREADY_EXISTS.0 {
+        return io::Error::new(io::ErrorKind::AlreadyExists, format_win_error(error)).into();
+    }
+    anyhow::anyhow!("Failed to add route: {}", format_win_error(error)).into()
 }
 
 fn format_win_error(error: u32) -> String {
@@ -208,7 +215,7 @@ impl IfConfiguerTrait for WindowsIfConfiger {
             next_hop: Ipv4Addr::UNSPECIFIED,
             metric: cost.unwrap_or(9000) as u32,
         }])
-        .map_err(|e| anyhow::anyhow!("Failed to add route: {}", format_win_error(e)))?;
+        .map_err(route_add_error)?;
         Ok(())
     }
 
@@ -296,7 +303,7 @@ impl IfConfiguerTrait for WindowsIfConfiger {
             next_hop: Ipv6Addr::UNSPECIFIED,
             metric: cost.unwrap_or(9000) as u32,
         }])
-        .map_err(|e| anyhow::anyhow!("Failed to add route: {}", format_win_error(e)))?;
+        .map_err(route_add_error)?;
         Ok(())
     }
 
@@ -471,6 +478,19 @@ mod tests {
     use windows::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
     };
+
+    #[test]
+    fn route_recovery_ignores_only_duplicate_routes() {
+        use super::{ERROR_ALREADY_EXISTS, ERROR_OBJECT_ALREADY_EXISTS, route_add_error};
+        for code in [ERROR_ALREADY_EXISTS.0, ERROR_OBJECT_ALREADY_EXISTS.0] {
+            assert!(
+                matches!(route_add_error(code), super::Error::IOError(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+            );
+        }
+        assert!(
+            !matches!(route_add_error(ERROR_ACCESS_DENIED.0), super::Error::IOError(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+    }
 
     #[test]
     fn removed_windows_ifcfg_ignores_only_not_found() {

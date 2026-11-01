@@ -488,8 +488,7 @@ fn ignore_removed_ifcfg_not_found(result: Result<(), Error>) -> Result<(), Error
     }
 }
 
-#[cfg(target_os = "linux")]
-fn ignore_added_ifcfg_already_exists(result: Result<(), Error>) -> Result<(), Error> {
+pub(crate) fn ignore_added_ifcfg_already_exists(result: Result<(), Error>) -> Result<(), Error> {
     match result {
         Err(Error::IOError(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         other => other,
@@ -753,6 +752,31 @@ impl SharedVirtualNicMember {
                 .retain(|route| route.address != address || route.prefix != cidr);
         })
         .await
+    }
+
+    pub(crate) async fn refresh_routes(&self) -> Result<(), Error> {
+        let member = self.clone();
+        SHARED_VIRTUAL_NIC_RUNTIME
+            .spawn(async move {
+                let shared = member.shared_nic.lock().await;
+                shared.ensure_valid()?;
+                let nic = shared.nic.lock().await;
+                let effective = shared.ifcfg.effective();
+                for route in &effective.ipv4_routes {
+                    ignore_added_ifcfg_already_exists(
+                        add_shared_ipv4_route(&nic, route, &shared.ifcfg).await,
+                    )?;
+                }
+                for route in &effective.ipv6_routes {
+                    ignore_added_ifcfg_already_exists(
+                        nic.add_ipv6_route_with_cost(route.address, route.prefix, route.cost)
+                            .await,
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(anyhow::Error::from)?
     }
 
     async fn update_claims<F>(&self, update: F) -> Result<(), Error>

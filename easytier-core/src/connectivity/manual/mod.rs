@@ -984,23 +984,25 @@ where
 pub(crate) async fn collect_bind_addrs<H>(
     peer_manager: &PeerManagerCore,
     host: &H,
-    is_udp: bool,
+    _is_udp: bool,
     remote_addr: SocketAddr,
 ) -> anyhow::Result<Vec<SocketAddr>>
 where
     H: ManualConnectorHost,
 {
-    if is_udp && remote_addr.is_ipv6() {
-        return Ok(Vec::new());
+    if remote_addr.ip().is_loopback() {
+        return Ok(vec![SocketAddr::new(remote_addr.ip(), 0)]);
     }
 
     let addrs = host.interface_addrs().await?;
     if remote_addr.is_ipv4() {
-        return Ok(addrs
+        let ret: Vec<_> = addrs
             .interface_ipv4s
             .into_iter()
             .map(|addr| SocketAddr::new(IpAddr::V4(addr), 0))
-            .collect());
+            .collect();
+        anyhow::ensure!(!ret.is_empty(), "no physical IPv4 source available");
+        return Ok(ret);
     }
 
     let mut ipv6s = addrs.interface_ipv6s;
@@ -1011,6 +1013,7 @@ where
             ret.push(SocketAddr::new(IpAddr::V6(addr), 0));
         }
     }
+    anyhow::ensure!(!ret.is_empty(), "no physical IPv6 source available");
     Ok(ret)
 }
 

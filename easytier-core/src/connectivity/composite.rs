@@ -26,7 +26,7 @@ use crate::{
     },
 };
 
-const INTERFACE_ADDR_CACHE_TTL: Duration = Duration::from_secs(60);
+const INTERFACE_ADDR_CACHE_TTL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct CachedInterfaceAddrs {

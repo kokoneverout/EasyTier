@@ -326,6 +326,9 @@ impl CoreInstanceConfig {
             manual_routes: config
                 .get_routes()
                 .map(|routes| routes.into_iter().collect::<BTreeSet<_>>()),
+            manual_routes_v6: config
+                .get_routes_v6()
+                .map(|routes| routes.into_iter().collect()),
             proxy: ProxyRuntimeConfig {
                 enable_exit_node: flags.enable_exit_node || host.force_exit_node,
                 no_tun: flags.no_tun,

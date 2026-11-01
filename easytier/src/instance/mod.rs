@@ -25,5 +25,8 @@ pub mod shared_virtual_nic;
 #[cfg(feature = "tun")]
 pub mod virtual_nic;
 
+#[cfg(any(all(windows, feature = "tun", feature = "magic-dns"), test))]
+pub(crate) mod windows_exit_dns;
+
 #[cfg(any(all(windows, feature = "tun"), test))]
 pub(crate) mod windows_udp_broadcast;

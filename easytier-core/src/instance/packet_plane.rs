@@ -78,6 +78,22 @@ impl CorePacketPlane {
         self.peer_manager.list_public_ipv6_routes().await
     }
 
+    pub async fn tun_ipv6_routes(&self) -> BTreeSet<cidr::Ipv6Inet> {
+        if let Some(routes) = &self.runtime_config.snapshot().services.manual_routes_v6 {
+            return routes
+                .iter()
+                .map(|route| {
+                    cidr::Ipv6Inet::new(route.first_address(), route.network_length()).unwrap()
+                })
+                .collect();
+        }
+        self.public_ipv6_routes().await
+    }
+
+    pub fn subscribe_route_config_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.runtime_config.subscribe_service_runtime_changes()
+    }
+
     pub async fn public_ipv6_addr(&self) -> Option<cidr::Ipv6Inet> {
         self.peer_manager.public_ipv6_addr().await
     }

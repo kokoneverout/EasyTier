@@ -173,6 +173,7 @@ impl NativeInstanceRuntimeHost {
         crate::instance::shared_virtual_nic::SharedIfConfigClaims,
         Option<crate::instance::shared_virtual_nic::SharedIfConfigClaims>,
         bool,
+        Option<std::net::IpAddr>,
     ) {
         (
             crate::instance::virtual_nic::NicCtx::mobile_tun_claims(&self.global_ctx, packet_plane)
@@ -181,6 +182,7 @@ impl NativeInstanceRuntimeHost {
             cfg!(feature = "magic-dns")
                 && self.global_ctx.get_flags().accept_dns
                 && self.global_ctx.get_ipv4().is_some(),
+            self.global_ctx.config.get_vpn_dns(),
         )
     }
 

@@ -1068,6 +1068,15 @@ pub struct NicCtx {
 
     #[cfg(target_os = "windows")]
     windows_udp_broadcast_relay: Option<AbortOnDropHandle<()>>,
+    #[cfg(all(windows, feature = "magic-dns"))]
+    exit_dns: std::sync::Mutex<Option<super::windows_exit_dns::WindowsExitDns>>,
+}
+
+impl Drop for NicCtx {
+    fn drop(&mut self) {
+        #[cfg(all(windows, feature = "magic-dns"))]
+        self.exit_dns.get_mut().unwrap().take();
+    }
 }
 
 impl NicCtx {
@@ -1109,6 +1118,8 @@ impl NicCtx {
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
+            #[cfg(all(windows, feature = "magic-dns"))]
+            exit_dns: std::sync::Mutex::new(None),
         }
     }
 
@@ -1152,6 +1163,8 @@ impl NicCtx {
     }
 
     pub(crate) async fn shutdown(&mut self) {
+        #[cfg(all(windows, feature = "magic-dns"))]
+        self.exit_dns.get_mut().unwrap().take();
         // The forwarding tasks own the TUN stream and sink. Wait until both
         // release the device before another NIC with the same name is created.
         self.tasks.shutdown().await;
@@ -1297,6 +1310,7 @@ impl NicCtx {
         cur_proxy_cidrs: &mut BTreeSet<cidr::Ipv4Cidr>,
         added: Vec<cidr::Ipv4Cidr>,
         removed: Vec<cidr::Ipv4Cidr>,
+        cost: Option<i32>,
     ) -> Result<(), Error> {
         tracing::debug!(?added, ?removed, "applying proxy_cidrs route changes");
 
@@ -1316,7 +1330,9 @@ impl NicCtx {
                     "remove route failed.",
                 );
             }
-            cur_proxy_cidrs.remove(&cidr);
+            if ret.is_ok() {
+                cur_proxy_cidrs.remove(&cidr);
+            }
         }
 
         // Add routes
@@ -1326,7 +1342,7 @@ impl NicCtx {
                 continue;
             }
             match backend
-                .add_route(cidr.first_address(), cidr.network_length())
+                .add_route_with_cost(cidr.first_address(), cidr.network_length(), cost)
                 .await
             {
                 Ok(()) => {
@@ -1348,7 +1364,9 @@ impl NicCtx {
         cur_routes: &mut BTreeSet<cidr::Ipv6Inet>,
         added: Vec<cidr::Ipv6Inet>,
         removed: Vec<cidr::Ipv6Inet>,
-    ) {
+        cost: Option<i32>,
+    ) -> Result<(), Error> {
+        let mut first_error = None;
         for route in removed {
             if !cur_routes.contains(&route) {
                 continue;
@@ -1359,7 +1377,9 @@ impl NicCtx {
             if ret.is_err() {
                 tracing::trace!(route = ?route, err = ?ret, "remove public ipv6 route failed");
             }
-            cur_routes.remove(&route);
+            if ret.is_ok() {
+                cur_routes.remove(&route);
+            }
         }
 
         for route in added {
@@ -1367,14 +1387,18 @@ impl NicCtx {
                 continue;
             }
             let ret = backend
-                .add_ipv6_route(route.address(), route.network_length())
+                .add_ipv6_route_with_cost(route.address(), route.network_length(), cost)
                 .await;
             if ret.is_err() {
                 tracing::trace!(route = ?route, err = ?ret, "add public ipv6 route failed");
+                if first_error.is_none() {
+                    first_error = ret.err();
+                }
             } else {
                 cur_routes.insert(route);
             }
         }
+        first_error.map_or(Ok(()), Err)
     }
 
     async fn run_proxy_cidrs_route_updater(&mut self) -> Result<(), Error> {
@@ -1383,6 +1407,7 @@ impl NicCtx {
         let backend = self.backend.clone();
         let mut event_receiver = global_ctx.subscribe();
 
+        let cost = global_ctx.config.get_routes().map(|_| 9000);
         let mut cur_proxy_cidrs = BTreeSet::<cidr::Ipv4Cidr>::new();
 
         // Initial sync: get current proxy_cidrs state and apply routes
@@ -1390,17 +1415,43 @@ impl NicCtx {
             tracing::error!("proxy CIDR monitor host is unavailable");
             return Ok(());
         };
-        if let Err(err) =
-            Self::apply_route_changes(&backend, &mut cur_proxy_cidrs, diff.added, diff.removed)
-                .await
+        if let Err(err) = Self::apply_route_changes(
+            &backend,
+            &mut cur_proxy_cidrs,
+            diff.added,
+            diff.removed,
+            cost,
+        )
+        .await
             && matches!(&backend, NicBackend::Shared(_))
         {
             return Err(err);
         }
 
         self.tasks.spawn(async move {
+            let mut recovery = tokio::time::interval(std::time::Duration::from_secs(15));
+            recovery.tick().await;
             loop {
-                let should_sync = match event_receiver.recv().await {
+                let event = tokio::select! {
+                    event = event_receiver.recv() => event,
+                    _ = recovery.tick() => {
+                        if let NicBackend::Shared(member) = &backend {
+                            if let Err(error) = member.refresh_routes().await {
+                                tracing::warn!(?error, "failed to reconcile shared routes");
+                            }
+                        } else {
+                            for route in &cur_proxy_cidrs {
+                                if let Err(error) = super::shared_virtual_nic::ignore_added_ifcfg_already_exists(
+                                    backend.add_route_with_cost(route.first_address(), route.network_length(), cost).await,
+                                ) {
+                                    tracing::warn!(?route, ?error, "failed to reconcile dedicated IPv4 route");
+                                }
+                            }
+                        }
+                        Ok(GlobalCtxEvent::ProxyCidrsUpdated(Vec::new(), Vec::new()))
+                    }
+                };
+                let should_sync = match event {
                     Ok(GlobalCtxEvent::ProxyCidrsUpdated(_, _)) => true,
                     Ok(_) => false,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -1430,6 +1481,7 @@ impl NicCtx {
                     &mut cur_proxy_cidrs,
                     diff.added,
                     diff.removed,
+                    cost,
                 )
                 .await
                 {
@@ -1447,33 +1499,61 @@ impl NicCtx {
         let backend = self.backend.clone();
         let mut event_receiver = global_ctx.subscribe();
 
+        let cost = global_ctx.config.get_routes_v6().map(|_| 9000);
         let mut cur_routes = BTreeSet::<cidr::Ipv6Inet>::new();
-        let initial_routes = packet_plane.public_ipv6_routes().await;
+        let mut config_changes = packet_plane.subscribe_route_config_changes();
+        let initial_routes = packet_plane.tun_ipv6_routes().await;
         let initial_added = initial_routes.iter().copied().collect::<Vec<_>>();
-        Self::apply_public_ipv6_route_changes(&backend, &mut cur_routes, initial_added, Vec::new())
-            .await;
+        Self::apply_public_ipv6_route_changes(
+            &backend,
+            &mut cur_routes,
+            initial_added,
+            Vec::new(),
+            cost,
+        )
+        .await?;
 
         self.tasks.spawn(async move {
+            let mut retry = tokio::time::interval(std::time::Duration::from_secs(15));
+            retry.tick().await;
             loop {
-                let event = match event_receiver.recv().await {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        event_receiver = event_receiver.resubscribe();
-                        let latest = packet_plane.public_ipv6_routes().await;
-                        let added = latest.difference(&cur_routes).copied().collect::<Vec<_>>();
-                        let removed = cur_routes.difference(&latest).copied().collect::<Vec<_>>();
-                        GlobalCtxEvent::PublicIpv6RoutesUpdated(added, removed)
+                tokio::select! {
+                    _ = retry.tick() => {
+                        if matches!(&backend, NicBackend::Dedicated(_)) {
+                            for route in &cur_routes {
+                                if let Err(error) = super::shared_virtual_nic::ignore_added_ifcfg_already_exists(
+                                    backend.add_ipv6_route_with_cost(route.address(), route.network_length(), cost).await,
+                                ) {
+                                    tracing::warn!(?route, ?error, "failed to reconcile dedicated IPv6 route");
+                                }
+                            }
+                        }
+                    },
+                    result = config_changes.changed() => if result.is_err() { break; },
+                    event = event_receiver.recv() => match event {
+                        Ok(GlobalCtxEvent::PublicIpv6RoutesUpdated(..)) => {},
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            event_receiver = event_receiver.resubscribe();
+                        }
                     }
-                };
+                }
+                let latest = packet_plane.tun_ipv6_routes().await;
+                let added = latest.difference(&cur_routes).copied().collect();
+                let removed = cur_routes.difference(&latest).copied().collect();
 
-                let (added, removed) = match event {
-                    GlobalCtxEvent::PublicIpv6RoutesUpdated(added, removed) => (added, removed),
-                    _ => continue,
-                };
-
-                Self::apply_public_ipv6_route_changes(&backend, &mut cur_routes, added, removed)
-                    .await;
+                if let Err(error) = Self::apply_public_ipv6_route_changes(
+                    &backend,
+                    &mut cur_routes,
+                    added,
+                    removed,
+                    cost,
+                )
+                .await
+                {
+                    tracing::warn!(?error, "failed to update IPv6 routes");
+                }
             }
         });
 
@@ -1600,6 +1680,15 @@ impl NicCtx {
         // without recreating the NIC.
         self.run_public_ipv6_addr_updater().await?;
 
+        #[cfg(all(windows, feature = "magic-dns"))]
+        if let Some(server) = self.global_ctx.config.get_vpn_dns() {
+            *self.exit_dns.get_mut().unwrap() = Some(super::windows_exit_dns::start(
+                &self.tun_ifname().await?,
+                self.global_ctx.get_id(),
+                server,
+            )?);
+        }
+
         Ok(())
     }
 
@@ -1619,22 +1708,32 @@ impl NicCtx {
                     SharedIpv4Route::new(route.first_address(), route.network_length(), None)
                 }));
         }
-        claims
-            .ipv6_routes
-            .extend(
-                packet_plane
-                    .public_ipv6_routes()
-                    .await
-                    .into_iter()
-                    .map(|route| {
-                        SharedIpv6Route::new(route.first_address(), route.network_length(), None)
-                    }),
-            );
+        claims.ipv6_routes.extend(
+            packet_plane
+                .tun_ipv6_routes()
+                .await
+                .into_iter()
+                .map(|route| {
+                    SharedIpv6Route::new(route.first_address(), route.network_length(), None)
+                }),
+        );
         if let Some(address) = packet_plane.public_ipv6_addr().await {
             claims.ipv6_addresses.insert(address);
             claims
                 .ipv6_routes
                 .insert(SharedIpv6Route::new(Ipv6Addr::UNSPECIFIED, 0, Some(5)));
+        }
+        if !global_ctx.config.get_exit_nodes().is_empty() {
+            if !claims.ipv4_addresses.is_empty() {
+                claims
+                    .ipv4_routes
+                    .insert(SharedIpv4Route::new(Ipv4Addr::UNSPECIFIED, 0, None));
+            }
+            if !claims.ipv6_addresses.is_empty() {
+                claims
+                    .ipv6_routes
+                    .insert(SharedIpv6Route::new(Ipv6Addr::UNSPECIFIED, 0, None));
+            }
         }
         claims
     }
@@ -1711,6 +1810,49 @@ mod tests {
     use crate::common::{error::Error, global_ctx::tests::get_mock_global_ctx};
 
     use super::{NicCtx, VirtualNic};
+
+    #[tokio::test]
+    async fn alignment_mobile_claims_preserve_manual_ipv6_and_dual_stack_exit() {
+        use crate::instance::{
+            shared_virtual_nic::{SharedIpv4Route, SharedIpv6Route},
+            test_instance::TestInstance,
+        };
+        use easytier_core::{config::toml::TomlConfig, process_runtime::CoreProcessRuntime};
+        let config = TomlConfig::new_from_str(
+            r#"
+ipv4 = "10.0.1.2/24"
+ipv6 = "fd12::2/64"
+routes = []
+routes_v6 = ["::/1", "8000::/1"]
+exit_nodes = ["10.0.1.1", "fd12::1"]
+listeners = []
+"#,
+        )
+        .unwrap();
+        let instance = TestInstance::new_with_process_runtime(config, CoreProcessRuntime::new());
+        let plane = instance.get_core_instance().packet_plane();
+        let claims = NicCtx::mobile_tun_claims(&instance.get_global_ctx(), &plane).await;
+        assert!(claims.ipv4_routes.contains(&SharedIpv4Route::new(
+            "0.0.0.0".parse().unwrap(),
+            0,
+            None
+        )));
+        assert!(
+            claims
+                .ipv6_routes
+                .contains(&SharedIpv6Route::new("::".parse().unwrap(), 0, None))
+        );
+        assert!(claims.ipv6_routes.contains(&SharedIpv6Route::new(
+            "8000::".parse().unwrap(),
+            1,
+            None
+        )));
+        assert!(
+            claims
+                .ipv6_addresses
+                .contains(&"fd12::2/64".parse().unwrap())
+        );
+    }
 
     #[cfg(target_os = "windows")]
     #[rstest::rstest]

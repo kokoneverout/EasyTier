@@ -31,6 +31,7 @@ struct MobileTunMember {
     claims: SharedIfConfigClaims,
     current_claims: Option<SharedIfConfigClaims>,
     dns: bool,
+    vpn_dns: Option<std::net::IpAddr>,
 }
 
 #[cfg(any(mobile, test))]
@@ -67,9 +68,26 @@ fn select_members(
     });
     let mut ifcfg = SharedIfConfig::default();
     let mut accepted = Vec::new();
+    let mut dns_server = None;
     for member in members {
+        let requested_dns = member.vpn_dns.map(|dns| dns.to_string()).or_else(|| {
+            member
+                .dns
+                .then(|| crate::instance::dns_server::MAGIC_DNS_FAKE_IP.to_owned())
+        });
+        if requested_dns
+            .as_ref()
+            .zip(dns_server.as_ref())
+            .is_some_and(|(requested, current)| requested != current)
+        {
+            rejected.push(MobileTunMemberError {
+                instance_id: member.instance_id,
+                error: "shared VPN members require the same DNS server".to_owned(),
+            });
+            continue;
+        }
         let mut claims = member.claims.clone();
-        if member.dns {
+        if member.dns && member.vpn_dns.is_none() {
             claims.ipv4_routes.insert(magic_dns_route());
         }
         if let Err(error) = ifcfg.ensure_disjoint(member.instance_id, &claims) {
@@ -80,6 +98,9 @@ fn select_members(
             continue;
         }
         ifcfg.apply_member_claims(member.instance_id, claims);
+        if requested_dns.is_some() {
+            dns_server = requested_dns;
+        }
         accepted.push(member);
     }
     (accepted, rejected)
@@ -116,7 +137,9 @@ fn config_for_members(
                 routes.insert(format!("{:#}", route.network()));
             }
         }
-        if member.dns {
+        if let Some(dns) = member.vpn_dns {
+            config.dns = Some(dns.to_string());
+        } else if member.dns {
             config.dns = Some(crate::instance::dns_server::MAGIC_DNS_FAKE_IP.to_owned());
             routes.insert(format!(
                 "{}/32",
@@ -155,7 +178,7 @@ async fn collect_members(
             });
             continue;
         };
-        let (claims, current_claims, dns) = runtime
+        let (claims, current_claims, dns, vpn_dns) = runtime
             .mobile_tun_claims(&instance.as_ref().unwrap().packet_plane())
             .await;
         members.push(MobileTunMember {
@@ -163,6 +186,7 @@ async fn collect_members(
             claims,
             current_claims,
             dns,
+            vpn_dns,
         });
     }
     (members, rejected)
@@ -275,6 +299,21 @@ mod tests {
     use super::*;
     use crate::instance::shared_virtual_nic::SharedIpv6Route;
 
+    #[test]
+    fn alignment_explicit_dns_overrides_magic_and_rejects_conflicting_members() {
+        let mut first = member(1, "10.0.1.1/24");
+        first.dns = true;
+        first.vpn_dns = Some("192.0.2.53".parse().unwrap());
+        let mut second = member(2, "10.0.2.1/24");
+        second.vpn_dns = Some("192.0.2.54".parse().unwrap());
+        let (members, rejected) = select_members(vec![first, second], Vec::new());
+        let config = config_for_members(&members, rejected);
+        assert_eq!(config.dns.as_deref(), Some("192.0.2.53"));
+        assert!(!config.routes.contains(&"100.100.100.101/32".to_owned()));
+        assert_eq!(config.instance_ids, vec![uuid::Uuid::from_u128(1)]);
+        assert_eq!(config.rejected.len(), 1);
+    }
+
     fn member(id: u128, address: &str) -> MobileTunMember {
         MobileTunMember {
             instance_id: uuid::Uuid::from_u128(id),
@@ -284,6 +323,7 @@ mod tests {
             },
             current_claims: None,
             dns: false,
+            vpn_dns: None,
         }
     }
 

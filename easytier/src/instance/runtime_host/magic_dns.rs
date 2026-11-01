@@ -28,7 +28,9 @@ impl MagicDnsRuntime {
         tun_ip: Ipv4Inet,
         shared_route_backend: Option<NicBackend>,
     ) -> Self {
-        let active = global_ctx.get_flags().accept_dns.then(|| {
+        let active = (global_ctx.get_flags().accept_dns
+            && global_ctx.config.get_vpn_dns().is_none())
+        .then(|| {
             let mut runner = DnsRunner::new(
                 packet_plane,
                 global_ctx,
