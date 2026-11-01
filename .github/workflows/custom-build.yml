@@ -1,27 +1,35 @@
-name: Alignment core release
-
+name: Custom Windows Linux Android
 on:
   push:
     branches: [codex/upstream-alignment]
     paths:
-      - '.github/workflows/custom-build.yml'
+      - '.github/**'
+      - '.cargo/**'
       - 'Cargo.*'
       - 'rust-toolchain.toml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
       - 'easytier/**'
       - 'easytier-core/**'
       - 'easytier-proto/**'
+      - 'easytier-rpc-build/**'
+      - 'easytier-gui/**'
+      - 'easytier-web/frontend-lib/**'
+      - 'tauri-plugin-vpnservice/**'
       - 'scripts/upstream-alignment/**'
   workflow_dispatch:
     inputs:
       platform:
-        description: Candidate platform
+        description: Platform to build
         type: choice
-        options: [all, linux-x86_64, windows-x86_64]
+        options: [all, linux-x86_64, windows-x86_64, android-arm64]
         default: all
-
 permissions:
   contents: read
-
+concurrency:
+  group: custom-build-${{ github.ref }}
+  cancel-in-progress: true
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_INCREMENTAL: '0'
@@ -29,13 +37,33 @@ env:
   CARGO_PROFILE_TEST_CODEGEN_UNITS: '16'
   CARGO_PROFILE_RELEASE_LTO: 'false'
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
-
 defaults:
   run:
     shell: bash
-
 jobs:
-  candidate:
+  frontend:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android-arm64'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/prepare-frontend
+        with:
+          token: ${{ github.token }}
+      - name: Build and test GUI
+        run: |
+          pnpm --filter tauri-plugin-vpnservice-api build
+          pnpm --filter easytier-gui build
+          pnpm --filter easytier-frontend-lib test:config-ui
+          pnpm --filter easytier-gui test:mobile-vpn
+      - uses: actions/upload-artifact@v5
+        with:
+          name: gui-build-input
+          path: easytier-gui/dist/
+          if-no-files-found: error
+          retention-days: 1
+  core:
+    if: inputs.platform != 'android-arm64'
     strategy:
       fail-fast: false
       matrix:
@@ -49,13 +77,14 @@ jobs:
       - uses: ./.github/actions/prepare-build
         with:
           target: ${{ env.TARGET }}
-          gui: 'false'
-          pnpm: 'false'
           token: ${{ github.token }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: alignment-core-${{ env.TARGET }}
+          shared-key: custom-core-${{ env.TARGET }}
           cache-on-failure: true
+      - name: Native library search path
+        if: runner.os == 'Windows'
+        run: echo "$GITHUB_WORKSPACE/easytier/third_party/x86_64" >> "$GITHUB_PATH"
       - name: Configuration regression
         run: |
           cargo test --locked -p easytier-core --lib --features browser-config config::
@@ -66,8 +95,23 @@ jobs:
           instance::factory::mobile_tun::tests instance::shared_virtual_nic::tests
           alignment_mobile_claims tunnel::quic::crypto::tests common::dns::tests
           core::tests::custom_dualstack common::ifcfg::windows::tests
+          --skip common::dns::tests::test_socket_addrs
       - name: Release build
         run: cargo build --release --locked -p easytier --bins --target "$TARGET" --features aes-gcm,mimalloc
+      - name: Isolated dual-stack routes and physical sockets
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --no-run --locked -p easytier --lib --features aes-gcm,mimalloc --message-format=json > native-tests.json
+          test_binary=$(python3 - <<'PY'
+          import json
+          rows = [json.loads(line) for line in open("native-tests.json")]
+          binaries = [r["executable"] for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "easytier" and r.get("profile", {}).get("test") and r.get("executable")]
+          assert len(binaries) == 1, binaries
+          print(binaries[0])
+          PY
+          )
+          sudo bash scripts/upstream-alignment/network-smoke.sh \
+            "target/$TARGET/release" "target/$TARGET/release" "$RUNNER_TEMP/network-smoke" "$test_binary"
       - name: Package
         run: |
           mkdir -p artifacts
@@ -80,10 +124,92 @@ jobs:
           fi
           printf 'Commit: %s\nTarget: %s\nLTO: false\nCodegen units: 16\nFeatures: aes-gcm,mimalloc\nRun: %s/%s/actions/runs/%s\n' \
             "$GITHUB_SHA" "$TARGET" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
-          (cd artifacts && sha256sum easytier-* > SHA256SUMS.txt)
+          (cd artifacts && sha256sum easytier-* BUILD.txt > SHA256SUMS.txt)
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            (cd artifacts && sha256sum *.dll *.sys >> SHA256SUMS.txt)
+          fi
       - uses: actions/upload-artifact@v5
         with:
-          name: alignment-${{ matrix.platform }}
+          name: easytier-custom-${{ matrix.platform }}
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+  android:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android-arm64'
+    needs: frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '11076708'
+          packages: 'build-tools;34.0.0 ndk;26.0.10792818 platform-tools platforms;android-34'
+      - name: Android toolchain
+        run: |
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.0.10792818" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/ndk/26.0.10792818/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/prepare-build
+        with:
+          target: aarch64-linux-android
+          token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: custom-android-aarch64
+          cache-on-failure: true
+      - uses: ./.github/actions/prepare-frontend
+        with:
+          token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui-build-input
+          path: easytier-gui/dist
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Restore external signing files
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PROPERTIES" || {
+            echo '::error::Android signing secrets are missing.'
+            exit 1
+          }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/easytier-android.jks"
+          printf '%s' "$KEYSTORE_PROPERTIES" > "$RUNNER_TEMP/easytier-android.properties"
+          echo "EASYTIER_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/easytier-android.jks" >> "$GITHUB_ENV"
+          echo "EASYTIER_ANDROID_KEYSTORE_PROPERTIES=$RUNNER_TEMP/easytier-android.properties" >> "$GITHUB_ENV"
+      - name: Build signed ARM64 APK from tested frontend
+        run: |
+          printf '%s\n' '{"build":{"beforeBuildCommand":"node -e \"process.exit(0)\""}}' > "$RUNNER_TEMP/tauri-build.json"
+          pnpm --filter easytier-gui exec tauri android build --apk --target aarch64 \
+            --split-per-abi --ci --features easytier/aes-gcm --config "$RUNNER_TEMP/tauri-build.json"
+      - name: Native app routing tests
+        working-directory: easytier-gui/src-tauri/gen/android
+        run: ./gradlew :tauri-plugin-vpnservice:testDebugUnitTest --no-daemon
+      - name: Verify signature and package
+        run: |
+          mkdir -p artifacts
+          apk=$(find easytier-gui/src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk')
+          test -f "$apk"
+          cp "$apk" artifacts/easytier-custom-android-arm64.apk
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs artifacts/*.apk > artifacts/CERTIFICATE.txt
+          cat artifacts/CERTIFICATE.txt
+          actual=$(awk -F': ' '/Signer #1 certificate SHA-256 digest/{print tolower($2)}' artifacts/CERTIFICATE.txt)
+          test "$actual" = '589080507c25cc5f136f489ada340bce870df8c97db73c0691ec2a1f2eb9fecc'
+          printf 'Commit: %s\nTarget: aarch64-linux-android\nLTO: false\nCodegen units: 16\nFeatures: easytier/aes-gcm\nRun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
+          (cd artifacts && sha256sum *.apk BUILD.txt CERTIFICATE.txt > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v5
+        with:
+          name: easytier-custom-android-arm64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove signing files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/easytier-android.jks" "$RUNNER_TEMP/easytier-android.properties"

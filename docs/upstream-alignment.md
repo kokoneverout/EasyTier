@@ -46,7 +46,9 @@
 - 3b05ec6f：显式源地址的 STUN/打洞 socket 也绑定物理设备，增加隔离行为回归。
 - 9f40a381：核对实际策略后才向界面报告应用成功。
 
-候选核心 CI 使用上游 prepare-build，独立验证 Windows/Linux，并记录源码、构建选项与哈希。当前 GitHub API 拒绝启动 Actions（返回仓库 Actions 已禁用，尽管仓库权限接口显示 enabled）；本轮不计作已运行验证，继续本地构建。
+GitHub Actions 仅保留 custom-build.yml：前端验证、Windows/Linux 核心及 Android ARM64 签名 APK。删除另外 13 套继承工作流、Docker 构建文件和不再使用的 pnpm/WASM 配置；仅保留 Rust 与前端两个准备动作。仓库里原来启用的 8 个继承工作流已禁用，避免默认分支继续额外触发。
+
+用户已重新启用 Actions，并明确要求停止在其电脑上构建。本机编译进程已停止，后续测试与发布构建全部交给 GitHub Actions。
 
 ## 验证
 
@@ -71,10 +73,10 @@ Linux，两个目录均需包含 core 与 cli：
 
     sudo bash scripts/upstream-alignment/network-smoke.sh OLD_BIN_DIR NEW_BIN_DIR OUTPUT_DIR
 
-采用 Rust 1.95、protoc 35.1、Android NDK 26。NDK clang 在 Android 构建 PATH 中先于桌面 clang。大型 Rust 构建逐个平台执行，避免本机内存不足。Linux 源码/缓存放持久目录，不使用随 WSL 退出清空的 /tmp；中断导致增量缓存异常时，清理对应工作区包或关闭增量编译。
+采用 Rust 1.95、protoc 35.1、Android NDK 26。NDK clang 在 Android 构建 PATH 中先于桌面 clang。三端使用独立的云端 runner，产物记录提交、构建选项和 SHA256。Android 使用已通过测试的前端资产及原有仓库签名 secrets，证书不匹配则拒绝交付。
 
 ## 发布状态
 
-源码迁移已完成，功能源码冻结于 9f40a381。Windows 首轮发布构建成功；首个签名 ARM64 APK 已生成并核对证书。冻结源码后的重打包、Linux 发布构建与最终核心复核仍在进行，当前没有将候选程序替换到生产设备。
+源码迁移已完成，功能源码冻结于 9f40a381。Windows 首轮本地发布构建成功；首个本地签名 ARM64 APK 已生成并核对证书。上述历史产物不作为本轮最终升级包，最终交付采用同一次云端流程生成的三端产物。当前没有将候选程序替换到生产设备。
 
 本地检查不等同于 Windows 实际 NRPT 切换或 Android 实机后台/升级验收。真实切换保留现行程序与配置，先准备独立五分钟自动回退，再逐设备验证；当前 Windows 连接放在最后。
