@@ -20,9 +20,19 @@ ip link set lo up
 unshare --net sleep 600 &
 peer_ns=$!
 cleanup() {
+  local result=$?
+  if [[ $result -ne 0 ]]; then
+    echo 'Network smoke failure diagnostics'
+    ip route || true
+    ss -uanp || true
+    nsenter -t "$peer_ns" -n ss -uanp || true
+    tail -60 "$out/${proto:-tcp}-old.log" 2>/dev/null || true
+    tail -60 "$out/${proto:-tcp}-control.log" 2>/dev/null || true
+  fi
   for pid in "${candidate_pid:-}" "${peer_pid:-}" "${control_pid:-}" "$peer_ns"; do
     if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; fi
   done
+  return "$result"
 }
 trap cleanup EXIT
 sleep 0.5

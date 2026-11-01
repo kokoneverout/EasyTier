@@ -87,13 +87,13 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/easytier/third_party/x86_64" >> "$GITHUB_PATH"
       - name: Configuration regression
         run: |
-          cargo test --locked -p easytier-core --lib --features browser-config config::
+          cargo test --locked -p easytier-core --lib --features browser-config -- config:: socket::udp::tests::udp_session_preserves_send_metadata
       - name: Runtime regression
         run: >-
           cargo test --locked -p easytier --lib --features aes-gcm,mimalloc --
           common::underlay::tests instance::windows_exit_dns::tests
           instance::factory::mobile_tun::tests instance::shared_virtual_nic::tests
-          alignment_mobile_claims tunnel::quic::crypto::tests common::dns::tests
+          alignment_mobile_claims tunnel::quic::crypto::tests tunnel::quic::session_socket::tests common::dns::tests
           core::tests::custom_dualstack common::ifcfg::windows::tests
           --skip common::dns::tests::test_socket_addrs
       - name: Release build

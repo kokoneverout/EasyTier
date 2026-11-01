@@ -23,7 +23,9 @@ use crate::{
 use super::{
     MAX_UDP_SESSION_DATAGRAM_SIZE, UDP_SESSION_QUEUE_CAPACITY,
     packet::{new_data_packet, udp_session_payload_len},
-    virtual_socket::{PreferredIpv6Source, UdpBindOptions, UdpSocketRecvMeta, VirtualUdpSocket},
+    virtual_socket::{
+        PreferredIpv6Source, UdpBindOptions, UdpSocketRecvMeta, UdpSocketSendMeta, VirtualUdpSocket,
+    },
 };
 
 #[derive(Debug)]
@@ -108,6 +110,11 @@ pub trait UdpSessionSocket: Send + Sync + 'static {
     fn peer_addr(&self) -> std::io::Result<SocketAddr>;
 
     async fn send(&self, data: &[u8]) -> std::io::Result<usize>;
+
+    async fn send_with_meta(&self, data: &[u8], meta: UdpSocketSendMeta) -> std::io::Result<usize> {
+        let _ = meta;
+        self.send(data).await
+    }
 
     async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize>;
 
@@ -408,6 +415,7 @@ pub struct UdpSession {
 pub(crate) enum UdpSessionOutbound {
     Datagram {
         payload: BytesMut,
+        meta: UdpSocketSendMeta,
         completion: oneshot::Sender<io::Result<usize>>,
     },
     TunnelPacket(ZCPacket),
@@ -684,6 +692,11 @@ impl UdpSessionSocket for UdpSession {
     }
 
     async fn send(&self, data: &[u8]) -> std::io::Result<usize> {
+        self.send_with_meta(data, UdpSocketSendMeta::default())
+            .await
+    }
+
+    async fn send_with_meta(&self, data: &[u8], meta: UdpSocketSendMeta) -> std::io::Result<usize> {
         self.codec.validate_payload(data)?;
         let mut closed = self.closed.clone();
         if *closed.borrow() {
@@ -692,6 +705,7 @@ impl UdpSessionSocket for UdpSession {
         let (completion, sent) = oneshot::channel();
         let outbound = UdpSessionOutbound::Datagram {
             payload: BytesMut::from(data),
+            meta,
             completion,
         };
         tokio::select! {
@@ -853,9 +867,10 @@ async fn forward_udp_session_to_socket<S>(
                 break;
             }
         };
-        let (datagram, completion) = match outbound {
+        let (datagram, meta, completion) = match outbound {
             UdpSessionOutbound::Datagram {
                 payload,
+                meta,
                 completion,
             } => {
                 let payload_len = payload.len();
@@ -873,7 +888,7 @@ async fn forward_udp_session_to_socket<S>(
                         break;
                     }
                 };
-                (datagram, Some((completion, payload_len)))
+                (datagram, meta, Some((completion, payload_len)))
             }
             UdpSessionOutbound::TunnelPacket(packet) => {
                 let datagram = match codec.encode_tunnel_packet(packet) {
@@ -884,10 +899,15 @@ async fn forward_udp_session_to_socket<S>(
                         break;
                     }
                 };
-                (datagram, None)
+                (datagram, UdpSocketSendMeta::default(), None)
             }
         };
-        match socket.send_to(&datagram, peer_addr).await {
+        let sent = if meta == UdpSocketSendMeta::default() {
+            socket.send_to(&datagram, peer_addr).await
+        } else {
+            socket.send_to_with_meta(&datagram, peer_addr, meta).await
+        };
+        match sent {
             Ok(_) => {
                 if let Some((completion, payload_len)) = completion {
                     let _ = completion.send(Ok(payload_len));

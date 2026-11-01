@@ -462,6 +462,57 @@ struct AutoSackVirtualUdpSocket {
     incoming_notify: tokio::sync::Notify,
 }
 
+#[tokio::test]
+async fn udp_session_preserves_send_metadata() {
+    struct MetadataSocket {
+        inner: AutoSackVirtualUdpSocket,
+        meta: Mutex<Option<UdpSocketSendMeta>>,
+    }
+    #[async_trait]
+    impl VirtualUdpSocket for MetadataSocket {
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+        async fn send_to(&self, data: &[u8], addr: SocketAddr) -> io::Result<usize> {
+            self.inner.send_to(data, addr).await
+        }
+        async fn send_to_with_meta(
+            &self,
+            data: &[u8],
+            addr: SocketAddr,
+            meta: UdpSocketSendMeta,
+        ) -> io::Result<usize> {
+            *self.meta.lock().unwrap() = Some(meta);
+            self.inner.send_to(data, addr).await
+        }
+        async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+            self.inner.recv_from(buf).await
+        }
+    }
+    let socket = Arc::new(MetadataSocket {
+        inner: AutoSackVirtualUdpSocket::new("0.0.0.0:12000".parse().unwrap()),
+        meta: Mutex::new(None),
+    });
+    let layer = UdpSessionLayer::new(socket.clone());
+    let session = layer
+        .open_classified_session(UdpSessionProtocol::Quic, "192.0.2.1:12001".parse().unwrap())
+        .unwrap();
+    let meta = UdpSocketSendMeta {
+        src_ip: Some("198.51.100.2".parse().unwrap()),
+        src_ifindex: Some(7),
+    };
+    let length = tokio::time::timeout(
+        Duration::from_secs(1),
+        session.send_with_meta(b"server reply", meta),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(length, 12);
+    assert_eq!(*socket.meta.lock().unwrap(), Some(meta));
+    assert_eq!(socket.inner.sent()[0].0, b"server reply");
+}
+
 impl AutoSackVirtualUdpSocket {
     fn new(local_addr: SocketAddr) -> Self {
         Self {

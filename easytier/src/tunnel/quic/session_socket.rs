@@ -9,7 +9,7 @@ use std::{
 
 use easytier_core::{
     connectivity::transport::ConnectedUdpSession,
-    socket::udp::{UdpSession, UdpSessionSocket},
+    socket::udp::{UdpSession, UdpSessionSocket, UdpSocketSendMeta},
 };
 use quinn::{
     AsyncUdpSocket, UdpPoller,
@@ -20,7 +20,10 @@ use tokio_util::task::AbortOnDropHandle;
 
 const DATAGRAM_QUEUE_CAPACITY: usize = 1024;
 
-type SendBatch = Vec<Vec<u8>>;
+struct SendBatch {
+    datagrams: Vec<Vec<u8>>,
+    meta: UdpSocketSendMeta,
+}
 type WritableFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
 struct ReceivedDatagram {
@@ -97,8 +100,8 @@ impl QuicUdpSessionSocket {
         let send_session = session.clone();
         let send_task = AbortOnDropHandle::new(tokio::spawn(async move {
             while let Some(batch) = outgoing_rx.recv().await {
-                for datagram in batch {
-                    match send_session.send(&datagram).await {
+                for datagram in batch.datagrams {
+                    match send_session.send_with_meta(&datagram, batch.meta).await {
                         Ok(length) if length == datagram.len() => {}
                         Ok(_) => {
                             let _ = recv_errors
@@ -145,7 +148,7 @@ impl QuicUdpSessionSocket {
             ));
         }
 
-        let batch = match transmit.segment_size {
+        let datagrams = match transmit.segment_size {
             Some(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -159,7 +162,15 @@ impl QuicUdpSessionSocket {
                 .collect(),
             None => vec![transmit.contents.to_vec()],
         };
-        self.outgoing.try_send(batch).map_err(map_try_send_error)
+        self.outgoing
+            .try_send(SendBatch {
+                datagrams,
+                meta: UdpSocketSendMeta {
+                    src_ip: transmit.src_ip,
+                    src_ifindex: None,
+                },
+            })
+            .map_err(map_try_send_error)
     }
 }
 
@@ -275,5 +286,63 @@ impl AsyncUdpSocket for QuicUdpSessionSocket {
 
     fn may_fragment(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use easytier_core::socket::udp::UdpSessionKind;
+
+    struct RecordingSession(mpsc::UnboundedSender<(Vec<u8>, UdpSocketSendMeta)>);
+
+    #[async_trait::async_trait]
+    impl UdpSessionSocket for RecordingSession {
+        fn kind(&self) -> UdpSessionKind {
+            UdpSessionKind::Quic
+        }
+        fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+            Ok("0.0.0.0:12000".parse().unwrap())
+        }
+        fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+            Ok("192.0.2.1:12001".parse().unwrap())
+        }
+        async fn send(&self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("QUIC source metadata was discarded"))
+        }
+        async fn send_with_meta(&self, data: &[u8], meta: UdpSocketSendMeta) -> io::Result<usize> {
+            self.0.send((data.to_vec(), meta)).unwrap();
+            Ok(data.len())
+        }
+        async fn recv(&self, _: &mut [u8]) -> io::Result<usize> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn quic_gso_segments_keep_the_selected_source_address() {
+        let (sent, mut received) = mpsc::unbounded_channel();
+        let socket =
+            QuicUdpSessionSocket::from_session(Arc::new(RecordingSession(sent)), Box::new(()))
+                .unwrap();
+        let source = "198.51.100.2".parse().unwrap();
+        socket
+            .send_batch(&Transmit {
+                destination: "192.0.2.1:12001".parse().unwrap(),
+                ecn: None,
+                contents: b"abcdefgh",
+                segment_size: Some(4),
+                src_ip: Some(source),
+            })
+            .unwrap();
+        for expected in [b"abcd", b"efgh"] {
+            let (payload, meta) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), received.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(payload, expected);
+            assert_eq!(meta.src_ip, Some(source));
+        }
     }
 }
