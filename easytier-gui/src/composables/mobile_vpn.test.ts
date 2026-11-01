@@ -731,6 +731,17 @@ describe('application policy on upstream VPN lifecycle', () => {
     expect((await mocks.getPolicy()).policy.mode).toBe('all')
     expect(mocks.startVpn).toHaveBeenCalledTimes(3)
   })
+
+  it('does not report a policy as applied when the shared TUN configuration is unavailable', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.getMobileTunConfig.mockRejectedValueOnce(new Error('backend unavailable'))
+    const outcome = await vpn.applyAppRoutingPolicy({ schemaVersion: 1, mode: 'include', packages: ['app.a'] })
+    expect(outcome.status).toBe('restored')
+    expect((await mocks.getPolicy()).policy.mode).toBe('all')
+  })
 })
 
 describe('mobile VPN tile action delivery', () => {

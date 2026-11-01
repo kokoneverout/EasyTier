@@ -612,8 +612,11 @@ export async function applyAppRoutingPolicy(policy: AppRoutingPolicy): Promise<A
     try {
       await reconcileNetworkInstance(generation, true)
       if (!isCurrentVpnReconcile(generation)) return { status: 'saved' }
-      if (!curVpnStatus.running) throw new Error('policy_apply_did_not_start_vpn')
-      return { status: 'applied', skippedPackages: checked.skippedPackages }
+      const current = await get_app_routing_policy()
+      if (!isCurrentVpnReconcile(generation)) return { status: 'saved' }
+      if (!curVpnStatus.running || appliedPolicySignature !== routingSignature(current))
+        throw new Error('policy_apply_did_not_start_vpn')
+      return { status: 'applied', skippedPackages: current.skippedPackages }
     } catch (error) {
       if (!isCurrentVpnReconcile(generation)) return { status: 'saved' }
       if (!previous) throw error
