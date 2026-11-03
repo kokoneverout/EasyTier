@@ -1,0 +1,115 @@
+name: HomeRouter ARM64 build and test
+on:
+  push:
+    branches: [codex/homerouter-arm64]
+    paths:
+      - '.github/workflows/homerouter.yml'
+      - 'scripts/homerouter/**'
+      - 'Cargo.*'
+      - 'easytier/**'
+      - 'easytier-core/**'
+      - 'easytier-proto/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: homerouter-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  CARGO_BUILD_JOBS: '3'
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_PROFILE_TEST_CODEGEN_UNITS: '16'
+  CARGO_PROFILE_RELEASE_LTO: 'thin'
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: 's'
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
+  TARGET: aarch64-unknown-linux-musl
+  ROUTER_FEATURES: cli,tun,aes-gcm,smoltcp,zstd,dns-resolver,tcp-hole-punch,quic
+defaults:
+  run:
+    shell: bash
+jobs:
+  router:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/prepare-build
+        with:
+          target: ${{ env.TARGET }}
+          token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: homerouter-arm64-musl
+          cache-on-failure: true
+      - name: Configuration and UDP metadata regression
+        run: |
+          cargo test --locked -p easytier-core --lib --features browser-config -- config:: socket::udp::tests::udp_session_preserves_send_metadata
+      - name: Router runtime regression
+        run: >-
+          cargo test --locked -p easytier --lib --no-default-features --features "$ROUTER_FEATURES" --
+          common::underlay::tests common::dns::tests core::tests::custom_dualstack
+          tunnel::quic::crypto::tests tunnel::quic::session_socket::tests
+          --skip common::dns::tests::test_socket_addrs
+      - name: Build static ARM64 core and CLI
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: >-
+          cargo build --locked --release --target "$TARGET" -p easytier
+          --bin easytier-core --bin easytier-cli
+          --no-default-features --features "$ROUTER_FEATURES"
+      - name: Validate architecture, linkage and startup
+        run: |
+          mkdir -p artifacts
+          for binary in easytier-core easytier-cli; do
+            cp "target/$TARGET/release/$binary" artifacts/
+            file "artifacts/$binary" | tee -a artifacts/ELF.txt
+            readelf -h "artifacts/$binary" | grep -q 'Machine:.*AArch64'
+            if readelf -l "artifacts/$binary" | grep -q INTERP; then exit 1; fi
+            if readelf -d "artifacts/$binary" | grep -q NEEDED; then exit 1; fi
+            "artifacts/$binary" --version | tee -a artifacts/STARTUP.txt
+          done
+          test "$(stat -c %s artifacts/easytier-core)" -lt 33554432
+      - name: Download verified legacy ARM64 peer
+        run: |
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/legacy.zip" \
+            https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-aarch64-v2.6.4.zip
+          echo 'f533ec25a7ea714e09f645615012200278058525795cc3bb690ff011aec1a70f  '"$RUNNER_TEMP/legacy.zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/legacy"
+          unzip -j "$RUNNER_TEMP/legacy.zip" '*/easytier-core' '*/easytier-cli' -d "$RUNNER_TEMP/legacy"
+          chmod +x "$RUNNER_TEMP/legacy/"*
+      - name: Ordinary node and legacy interoperability
+        run: |
+          set -o pipefail
+          sudo bash scripts/homerouter/ordinary-node-smoke.sh \
+            "$RUNNER_TEMP/legacy" "$PWD/artifacts" "$RUNNER_TEMP/ordinary-smoke" | tee artifacts/ORDINARY-TESTS.txt
+      - name: Isolated dual-stack routes and physical sockets
+        run: |
+          set -o pipefail
+          sudo bash scripts/upstream-alignment/network-smoke.sh \
+            "$PWD/artifacts" "$PWD/artifacts" "$RUNNER_TEMP/network-smoke" | tee artifacts/NETWORK-TESTS.txt
+      - name: Package verified binaries
+        run: |
+          printf 'Commit: %s\nBase: 8af7c974670e9c4f23c64661debcd8b89661e507\nTarget: %s\nFeatures: %s\nRun: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$TARGET" "$ROUTER_FEATURES" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > artifacts/BUILD.txt
+          (cd artifacts && sha256sum easytier-core easytier-cli *.txt > SHA256SUMS.txt)
+          tar -C artifacts -czf easytier-homerouter-arm64.tar.gz .
+      - uses: actions/upload-artifact@v5
+        with:
+          name: easytier-homerouter-arm64
+          path: |
+            artifacts/*
+            easytier-homerouter-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: homerouter-test-diagnostics
+          path: |
+            ${{ runner.temp }}/ordinary-smoke/
+            ${{ runner.temp }}/network-smoke/
+          if-no-files-found: ignore
+          retention-days: 7
