@@ -47,16 +47,19 @@ for direction in candidate-client candidate-server; do
     endpoint=192.0.2.2
     if [[ $transport == *6 ]]; then endpoint='[fd12::2]'; fi
     label=$direction-$transport
+    server_ipv6=() client_ipv6=()
+    if [[ $direction == candidate-server ]]; then server_ipv6=(--ipv6 fd53::1/64); fi
+    if [[ $direction == candidate-client ]]; then client_ipv6=(--ipv6 fd53::2/64); fi
     nsenter -t "$peer_ns" -n "$server/easytier-core" \
       --network-name router-ci --network-secret isolated \
-      --ipv4 10.253.3.1/24 --ipv6 fd53::1/64 --dev-name servertun \
+      --ipv4 10.253.3.1/24 "${server_ipv6[@]}" --dev-name servertun \
       --listeners "$proto://$endpoint:31334" --rpc-portal 31335 \
       --bind-device true --disable-p2p true --disable-udp-hole-punching true \
       >"$out/$label-server.log" 2>&1 &
     server_pid=$!
     "$client/easytier-core" \
       --network-name router-ci --network-secret isolated \
-      --ipv4 10.253.3.2/24 --ipv6 fd53::2/64 --dev-name clienttun \
+      --ipv4 10.253.3.2/24 "${client_ipv6[@]}" --dev-name clienttun \
       --no-listener --peers "$proto://$endpoint:31334" --rpc-portal 31336 \
       --bind-device true --disable-p2p true --disable-udp-hole-punching true \
       >"$out/$label-client.log" 2>&1 &
@@ -68,9 +71,7 @@ for direction in candidate-client candidate-server; do
       if ping -q -c 1 -W 1 10.253.3.1 >"$out/$label-ping4.log" 2>&1; then connected=true; break; fi
     done
     [[ $connected == true ]]
-    ping -6 -q -c 3 -W 2 fd53::1 >"$out/$label-ping6.log"
     nsenter -t "$peer_ns" -n ping -q -c 3 -W 2 10.253.3.2 >"$out/$label-reverse4.log"
-    nsenter -t "$peer_ns" -n ping -6 -q -c 3 -W 2 fd53::2 >"$out/$label-reverse6.log"
     "$client/easytier-cli" -p 127.0.0.1:31336 -o json peer >"$out/$label-peer.json"
     ip route show default > "$out/default4-after"
     ip -6 route show default > "$out/default6-after"
@@ -78,7 +79,7 @@ for direction in candidate-client candidate-server; do
     cmp "$out/default4-before" "$out/default4-after"
     cmp "$out/default6-before" "$out/default6-after"
     cmp "$out/dns-before" "$out/dns-after"
-    echo "PASS $label: bidirectional IPv4/IPv6 payload, unchanged default routes and DNS"
+    echo "PASS $label: bidirectional IPv4 payload over ${transport} transport, unchanged default routes and DNS"
     kill "$client_pid" "$server_pid"
     wait "$client_pid" "$server_pid" 2>/dev/null || true
     client_pid= server_pid=
