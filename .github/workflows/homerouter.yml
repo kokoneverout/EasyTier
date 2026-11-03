@@ -24,7 +24,7 @@ env:
   CARGO_PROFILE_RELEASE_OPT_LEVEL: 's'
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
   TARGET: aarch64-unknown-linux-musl
-  ROUTER_FEATURES: cli,tun,aes-gcm,smoltcp,zstd,dns-resolver,tcp-hole-punch,quic
+  ROUTER_FEATURES: cli,tun,aes-gcm,smoltcp,zstd,dns-resolver,tcp-hole-punch,quic,proxy-cidr-monitor
 defaults:
   run:
     shell: bash
@@ -48,7 +48,7 @@ jobs:
       - name: Router runtime regression
         run: >-
           cargo test --locked -p easytier --lib --no-default-features --features "$ROUTER_FEATURES" --
-          common::underlay::tests common::dns::tests core::tests::custom_dualstack
+          common::underlay::tests common::dns::tests core::tests::custom_dualstack alignment_mobile_claims
           tunnel::quic::crypto::tests tunnel::quic::session_socket::tests
           --skip common::dns::tests::test_socket_addrs
       - name: Build static ARM64 core and CLI
