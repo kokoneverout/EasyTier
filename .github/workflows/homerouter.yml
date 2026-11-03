@@ -71,6 +71,11 @@ jobs:
             "artifacts/$binary" --version | tee -a artifacts/STARTUP.txt
           done
           test "$(stat -c %s artifacts/easytier-core)" -lt 33554432
+      - name: OpenWrt loopback DNS regression
+        run: |
+          set -o pipefail
+          sudo bash scripts/homerouter/loopback-dns-smoke.sh \
+            "$PWD/artifacts" "$RUNNER_TEMP/loopback-dns" | tee artifacts/LOOPBACK-DNS-TESTS.txt
       - name: Download verified legacy ARM64 peer
         run: |
           curl --fail --location --retry 3 -o "$RUNNER_TEMP/legacy.zip" \
@@ -109,6 +114,7 @@ jobs:
         with:
           name: homerouter-test-diagnostics
           path: |
+            ${{ runner.temp }}/loopback-dns/
             ${{ runner.temp }}/ordinary-smoke/
             ${{ runner.temp }}/network-smoke/
           if-no-files-found: ignore

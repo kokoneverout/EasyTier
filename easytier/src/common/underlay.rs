@@ -119,6 +119,11 @@ fn virtual_networks() -> Vec<(IpAddr, u8)> {
 }
 
 pub(crate) fn usable_dns(ip: IpAddr) -> bool {
+    // Local DNS forwarders (dnsmasq/systemd-resolved) stay reachable on loopback;
+    // source() already selects a loopback source for these destinations.
+    if ip.is_loopback() {
+        return true;
+    }
     usable_source(ip)
         && !virtual_networks()
             .into_iter()
@@ -140,6 +145,18 @@ fn same_subnet(addr: IpAddr, prefix: u8, ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accepts_local_dns_without_advertising_loopback_sources() {
+        for address in ["127.0.0.1", "127.0.0.53", "::1"] {
+            let ip = address.parse().unwrap();
+            assert!(usable_dns(ip));
+            assert!(!usable_source(ip));
+        }
+        for address in ["0.0.0.0", "::", "169.254.1.2", "fe80::1", "224.0.0.1"] {
+            assert!(!usable_dns(address.parse().unwrap()));
+        }
+    }
+
     #[test]
     fn allows_nat66_sources_and_excludes_invalid_addresses() {
         assert!(usable_source("fd12::2".parse().unwrap()));
