@@ -1,0 +1,35 @@
+name: Prepare Rust build
+description: Set up the pinned compiler, protoc and native dependencies for our three targets
+inputs:
+  target:
+    description: Rust target
+    required: true
+  token:
+    description: Token for protoc download
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Linux native dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -qqy build-essential mold musl-tools libclang-dev
+    - name: Windows native tools
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        'C:\Program Files\7-Zip' | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        'C:\Program Files\LLVM\bin' | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        'LIBCLANG_PATH=C:\Program Files\LLVM\bin' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - uses: arduino/setup-protoc@v3
+      with:
+        version: '35.1'
+        repo-token: ${{ inputs.token }}
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: '1.95'
+        target: ${{ inputs.target }}
+        cache: false
+        rustflags: ''
